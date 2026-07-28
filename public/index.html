@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0e1116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lift">
+<title>Lift</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ───────────── HOME ───────────── -->
+  <section id="scr-home" class="screen active">
+    <header class="topbar">
+      <div>
+        <h1>Lift</h1>
+        <div class="sub" id="homeSub">—</div>
+      </div>
+      <button class="icon-btn" id="btnHistory" aria-label="History">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v4h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </header>
+
+    <div class="scroll" id="homeScroll">
+      <div id="streakRow" class="streak-row"></div>
+      <div id="todayList" class="card-list"></div>
+
+      <label class="opt-row">
+        <span><b>Leg Curl</b><small>optional — include in workouts</small></span>
+        <input type="checkbox" id="optLegCurl" class="switch">
+      </label>
+
+      <div class="pad-bottom"></div>
+    </div>
+
+    <div class="footer-bar">
+      <button class="primary big" id="btnStart">Start workout</button>
+    </div>
+  </section>
+
+  <!-- ───────────── SESSION ───────────── -->
+  <section id="scr-session" class="screen">
+    <header class="topbar session-top">
+      <button class="icon-btn" id="btnQuit" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="ex-dots" id="exDots"></div>
+      <div class="elapsed" id="elapsed">0:00</div>
+    </header>
+
+    <div class="scroll session-body">
+      <div class="ex-head">
+        <div class="ex-name" id="exName">—</div>
+        <div class="ex-sub" id="exSub">—</div>
+      </div>
+
+      <div class="weight-block">
+        <button class="wbtn" id="wDown" aria-label="Less weight">−</button>
+        <div class="weight">
+          <span id="exWeight">0</span><small>lb</small>
+        </div>
+        <button class="wbtn" id="wUp" aria-label="More weight">+</button>
+      </div>
+
+      <div class="set-rows" id="setRows"></div>
+
+      <div class="rep-pad" id="repPad">
+        <div class="rep-label">Reps this set</div>
+        <div class="rep-input">
+          <button class="rbtn" id="rDown">−</button>
+          <div class="rep-val" id="repVal">8</div>
+          <button class="rbtn" id="rUp">+</button>
+        </div>
+        <div class="rep-chips" id="repChips"></div>
+        <button class="primary big" id="btnLogSet">Log set</button>
+        <button class="ghost" id="btnSkipEx">Skip this exercise</button>
+      </div>
+    </div>
+
+    <!-- rest overlay -->
+    <div class="rest" id="restPane" hidden>
+      <div class="rest-inner">
+        <svg class="ring" viewBox="0 0 120 120">
+          <circle cx="60" cy="60" r="54" class="ring-bg"/>
+          <circle cx="60" cy="60" r="54" class="ring-fg" id="ringFg"/>
+        </svg>
+        <div class="rest-num" id="restNum">90</div>
+        <div class="rest-label">Rest</div>
+        <div class="rest-next" id="restNext">—</div>
+        <button class="primary" id="btnSkipRest">Skip rest</button>
+        <button class="ghost" id="btnAddRest">+30s</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────── SUMMARY ───────────── -->
+  <section id="scr-done" class="screen">
+    <div class="scroll">
+      <div class="done-head">
+        <div class="done-check">✓</div>
+        <h2 id="doneTitle">Workout complete</h2>
+        <div class="sub" id="doneSub">—</div>
+      </div>
+      <div id="doneList" class="card-list"></div>
+      <div class="pad-bottom"></div>
+    </div>
+    <div class="footer-bar">
+      <button class="primary big" id="btnDoneClose">Done</button>
+    </div>
+  </section>
+
+  <!-- ───────────── HISTORY ───────────── -->
+  <section id="scr-history" class="screen">
+    <header class="topbar">
+      <button class="icon-btn" id="btnBackHome" aria-label="Back">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <h1>History</h1>
+      <div style="width:40px"></div>
+    </header>
+    <div class="scroll" id="historyScroll">
+      <div id="chartWrap"></div>
+      <div id="historyList" class="card-list"></div>
+      <div class="pad-bottom"></div>
+    </div>
+  </section>
+
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<div id="offline" class="offline-pill" hidden>Offline — saved on device</div>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>

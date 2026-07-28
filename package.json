@@ -1,0 +1,15 @@
+{
+  "name": "workout",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Personal progressive-overload workout tracker (PWA)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/test.js && node test/client-check.js",
+    "deploy": "npm test && sudo systemctl restart workout && sleep 2 && systemctl is-active workout"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}

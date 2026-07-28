@@ -1,0 +1,63 @@
+// Entry point: boot, screen routing, service-worker registration.
+import { S } from './state.js';
+import { $, showScreen, toast } from './util.js';
+import { initSync, fetchState, flushQueue } from './sync.js';
+import { initHome, renderHome } from './home.js';
+import { initSession, startSession, restoreSession, endSessionUI, renderSession } from './session.js';
+import { renderSummary } from './summary.js';
+import { renderHistory } from './history.js';
+
+function goHome() {
+  endSessionUI();
+  showScreen('scr-home');
+  renderHome();
+}
+
+function goHistory() {
+  renderHistory();
+  showScreen('scr-history');
+}
+
+async function onFinish(snap, synced) {
+  renderSummary(snap, synced);
+  showScreen('scr-done');
+  if (!synced) toast('Saved on device');
+}
+
+async function boot() {
+  initSync();
+  await fetchState();
+
+  if (!S.wire) {
+    document.body.innerHTML =
+      '<div style="padding:60px 24px;text-align:center;color:#8d9aab;font:16px system-ui">' +
+      'Could not load. Check your connection and reload.</div>';
+    return;
+  }
+
+  restoreSession();
+
+  initHome(startSession, goHistory);
+  initSession(onFinish, goHome);
+  $('btnDoneClose').addEventListener('click', goHome);
+  $('btnBackHome').addEventListener('click', goHome);
+
+  renderHome();
+  showScreen('scr-home');
+  flushQueue();
+
+  // A resumed session should redraw against fresh wire data when we come back.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if ($('scr-session').classList.contains('active')) renderSession();
+    else if ($('scr-home').classList.contains('active')) fetchState().then(renderHome);
+  });
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  });
+}
+
+boot();
