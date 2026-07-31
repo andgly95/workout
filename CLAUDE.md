@@ -4,6 +4,7 @@ Personal progressive-overload workout tracker. Single user (Andrew), no accounts
 auth is Cloudflare Access in front of the tunnel, so the app itself has no login.
 
 Live at **https://workout.guess-ai.app** (Cloudflare tunnel `hot-seat` → `localhost:3003`).
+Repo: `github.com/andgly95/workout` (private).
 
 ## Stack
 
@@ -42,6 +43,7 @@ has a test in `test/test.js`.
 ```
 server.js              — express setup + listen (~12 lines)
 store.js               — JSON read/write, debounced atomic save, SIGTERM flush
+deploy.sh              — npm test → restart → verify active → push to GitHub
 lib/
   progression.js       — EXERCISES, startingState(), nextState() — THE rules
   routes.js            — all HTTP; cache-bust stamp; plannedEntries(); applyProgression()
@@ -116,9 +118,13 @@ state = {
 ## Deployment
 
 ```bash
-npm run deploy                   # npm test, then restart + active check
+npm run deploy                   # npm test → restart → verify active → push to GitHub
 sudo systemctl status workout    # logs
+sudo journalctl -u workout -n 50
 ```
+
+The push is non-fatal so a deploy doesn't fail when offline. The restart is what busts
+client caches — the `/js-<STAMP>/` prefix is stamped at server startup.
 
 Ingress lives in `~/.cloudflared/config.yml` (shared with the-square and
 liner-note); the tunnel is `hot-seat`. Restart `cloudflared` after editing it.
