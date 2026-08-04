@@ -1,7 +1,8 @@
 // Today screen — the prescription for the next workout.
 import { S } from './state.js';
-import { $, esc, dayLabel, todayStr, parseDay } from './util.js';
+import { $, esc, dayLabel, todayStr, parseDay, toast } from './util.js';
 import { saveSettings } from './sync.js';
+import { alertsSupported, alertsOn, enableAlerts, muteAlerts } from './alarm.js';
 
 export function exName(id) {
   const e = (S.wire?.exercises || []).find(x => x.id === id);
@@ -75,6 +76,22 @@ export function renderHome() {
 
   $('optLegCurl').checked = !!S.wire.settings?.includeOptional;
   $('btnStart').textContent = S.session ? 'Resume workout' : 'Start workout';
+  renderAlertRow();
+}
+
+// The switch controls the BANNER only. The tone is scheduled on the audio thread
+// whatever this says, because that's the alert that reaches you with the phone
+// locked in a pocket — see alarm.js.
+function renderAlertRow() {
+  const row = $('alertRow');
+  if (!alertsSupported()) { row.hidden = true; return; }
+  row.hidden = false;
+  const denied = Notification.permission === 'denied';
+  $('optAlerts').checked = alertsOn();
+  $('optAlerts').disabled = denied;
+  $('alertSub').textContent = denied
+    ? 'blocked — turn notifications on for Lift in Settings'
+    : 'banner when the rest timer runs out';
 }
 
 export function initHome(onStart, onHistory) {
@@ -83,5 +100,12 @@ export function initHome(onStart, onHistory) {
   $('optLegCurl').addEventListener('change', async (e) => {
     await saveSettings({ includeOptional: e.target.checked });
     renderHome();
+  });
+  // The permission prompt only works from a gesture, which this is.
+  $('optAlerts').addEventListener('change', async (e) => {
+    if (!e.target.checked) { muteAlerts(true); return renderAlertRow(); }
+    const ok = await enableAlerts();
+    if (!ok) toast('Allow notifications for Lift to get the banner');
+    renderAlertRow();
   });
 }

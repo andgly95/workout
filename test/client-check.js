@@ -156,15 +156,41 @@ function connectCdp(wsUrl) {
     check(await evalJs(`document.getElementById('repVal').innerText`) === '12', 'rep chip failed');
     await evalJs(`document.querySelector('#repChips button[data-r="8"]').click()`);
 
+    // The rest alert is queued on the AUDIO thread the moment rest starts, not
+    // when the countdown hits zero — on a backgrounded iOS PWA no timer ever
+    // runs to see it hit zero. Importing the module by its stamped URL gets the
+    // same instance app.js is using, so this reads the real state rather than
+    // needing a debug hook in production code.
+    const alarmPending = () => evalJs(`(async () => {
+      const src = document.querySelector('script[type=module]').getAttribute('src');
+      const m = await import(src.replace('app.js', 'alarm.js'));
+      return m.alarmPending();
+    })()`);
+
     for (let i = 0; i < 15; i++) {
       const last = i === 14;
       await evalJs(`document.getElementById('btnLogSet').click()`);
       await sleep(250);
       if (last) break;
       check(await visible('restPane'), `rest pane did not open after set ${i + 1}`);
+      if (i === 0) {
+        check(await alarmPending() === true,
+          'starting a rest did not schedule the alert on the audio thread');
+      }
+      if (i === 1) {
+        // +30s tears the rest down and rebuilds it. If it forgot to re-queue the
+        // tone you would get a silent rest and no way to tell until the gym.
+        await evalJs(`document.getElementById('btnAddRest').click()`);
+        await sleep(200);
+        check(await alarmPending() === true, '+30s dropped the alert instead of moving it');
+      }
       await evalJs(`document.getElementById('btnSkipRest').click()`);
       await sleep(200);
       check(!(await visible('restPane')), `rest pane did not close after set ${i + 1}`);
+      if (i === 0) {
+        check(await alarmPending() === false,
+          'skipping rest must unschedule the tone, or it fires mid-set');
+      }
     }
 
     await sleep(900);
@@ -179,16 +205,43 @@ function connectCdp(wsUrl) {
     const homeAfter = await evalJs(`document.getElementById('todayList').innerText.replace(/\\n/g,' ')`);
     check(/3 × 10/.test(homeAfter), `home did not advance to 3 × 10:\n${homeAfter}`);
 
-    // History renders with the chart.
+    // The rest-alerts switch is offered on the home screen.
+    check(await visible('alertRow'), 'the rest-alerts row should be on the home screen');
+
+    // History renders with the calendar and the chart.
     await evalJs(`document.getElementById('btnHistory').click()`);
     await sleep(500);
     check(await evalJs(`document.querySelectorAll('#historyList .h-card').length`) >= 1, 'no history card');
     check(await evalJs(`document.querySelectorAll('#chartWrap .chart').length`) >= 1, 'no chart');
+
+    // ── the twelve-week calendar ────────────────────────────────────────
+    // By layout, not by property: a collapsed grid would still have 84 nodes.
+    check(await visible('calWrap'), 'the calendar is in the DOM but not on screen');
+    const squares = await evalJs(`document.querySelectorAll('#calWrap .hm-col i').length`);
+    check(squares === 84, `expected 84 day squares, got ${squares}`);
+    check(await evalJs(`document.querySelectorAll('#calWrap .hm-col').length`) === 12,
+      'expected twelve week columns');
+    const sqW = await evalJs(
+      `document.querySelector('#calWrap .hm-col i').getBoundingClientRect().width`);
+    check(sqW >= 8, `day squares are too small to hit with a thumb: ${sqW}px`);
+
+    // The workout just logged should light today's square and carry its id.
+    check(await evalJs(`document.querySelectorAll('#calWrap .hm-col i[data-w]').length`) >= 1,
+      'the workout just logged did not light a square');
+
+    // Tapping a lit square flashes its card in the list below.
+    await evalJs(`document.querySelector('#calWrap .hm-col i[data-w]').click()`);
+    await sleep(400);
+    check(await evalJs(`document.querySelectorAll('#historyList .h-card.lit').length`) === 1,
+      'tapping a day did not highlight its workout');
+    check(/a week/.test(await evalJs(`document.querySelector('#calWrap .hm-foot').innerText`)),
+      'the calendar should report the per-week rate');
+
     await evalJs(`document.getElementById('btnBackHome').click()`);
     await sleep(300);
 
     if (errors.length) throw new Error('page errors:\n' + errors.join('\n'));
-    console.log('client-check: ok — full workout ran clean');
+    console.log('client-check: ok — full workout, calendar and alerts all clean');
   } catch (e) {
     fail = e;
     console.error('client-check FAILED:', e.message);

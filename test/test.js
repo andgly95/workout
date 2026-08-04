@@ -127,6 +127,151 @@ async function rules() {
   });
 }
 
+/* ── 1b. the training calendar ─────────────────────────────────────────── */
+//
+// Day bucketing is where a calendar goes wrong, and none of it shows up until a
+// square lands on the wrong weekday months later. Every way it can drift gets a
+// row here.
+
+async function calendarGrid() {
+  console.log('\ntraining calendar');
+  const C = require('../lib/calendar');
+
+  // 2026-08-03 is a Monday, 2026-08-04 a Tuesday, 2026-07-29 a Wednesday.
+  const w = (date, sets = [10, 10, 10], weight = 100, id = null) => ({
+    id: id || `w-${date}`, done: true, date,
+    entries: [{ id: 'leg-press', weight, sets, skipped: false }],
+  });
+
+  await t('the grid is a whole number of weeks, Monday first', () => {
+    const h = C.buildHeatmap([], '2026-08-04');
+    assert.strictEqual(h.cells.length, 12 * 7);
+    assert.strictEqual(h.cells[0].dow, 0);
+    assert.strictEqual(C.parseDay(h.start).getDay(), 1, 'the grid must start on a Monday');
+    assert.strictEqual(C.parseDay(h.end).getDay(), 0, 'and end on a Sunday');
+  });
+
+  await t('a Sunday "today" still shows its whole week', () => {
+    // 2026-08-09 is a Sunday. Cutting the grid at today would drop six days and
+    // read as a missing week.
+    const h = C.buildHeatmap([], '2026-08-09');
+    assert.strictEqual(h.end, '2026-08-09');
+    assert.strictEqual(h.cells.filter(c => c.future).length, 0);
+  });
+
+  await t('days after today are marked, not shaded', () => {
+    const h = C.buildHeatmap([], '2026-08-04');   // a Tuesday
+    const future = h.cells.filter(c => c.future);
+    assert.strictEqual(future.length, 5, 'Wednesday to Sunday of the current week');
+    assert.ok(future.every(c => c.level === 0));
+  });
+
+  await t('a workout lands on its own weekday', () => {
+    const h = C.buildHeatmap([w('2026-07-29')], '2026-08-04');
+    const cell = h.cells.find(c => c.date === '2026-07-29');
+    assert.strictEqual(cell.dow, 2, '29 July 2026 is a Wednesday');
+    assert.ok(cell.level > 0);
+  });
+
+  await t('two sessions on one day are one square, and the volumes add', () => {
+    const h = C.buildHeatmap(
+      [w('2026-08-03', [10, 10, 10], 100, 'wA'), w('2026-08-03', [5, 5, 5], 100, 'wB')],
+      '2026-08-04');
+    const day = h.cells.filter(c => c.date === '2026-08-03');
+    assert.strictEqual(day.length, 1, 'a date must appear exactly once in the grid');
+    assert.strictEqual(day[0].volume, 3000 + 1500);
+    assert.strictEqual(h.sessions, 2, 'but both still count towards the rate');
+  });
+
+  await t('only finished workouts count', () => {
+    const open = { ...w('2026-08-03'), done: false };
+    const h = C.buildHeatmap([open], '2026-08-04');
+    assert.strictEqual(h.sessions, 0);
+    assert.strictEqual(h.cells.find(c => c.date === '2026-08-03').level, 0);
+  });
+
+  await t('a skipped exercise adds no volume', () => {
+    const skipped = {
+      entries: [{ id: 'leg-press', weight: 100, sets: [10, 10, 10], skipped: true }],
+    };
+    assert.strictEqual(C.volumeOf(skipped).volume, 0);
+    assert.strictEqual(C.volumeOf(skipped).sets, 0);
+  });
+
+  await t('an unlogged set adds nothing, a logged one adds weight × reps', () => {
+    const half = { entries: [{ id: 'x', weight: 80, sets: [10, null, null] }] };
+    assert.strictEqual(C.volumeOf(half).volume, 800);
+    assert.strictEqual(C.volumeOf(half).sets, 1);
+  });
+
+  await t('anything older than the window is left out', () => {
+    const h = C.buildHeatmap([w('2025-01-01'), w('2026-08-03')], '2026-08-04');
+    assert.strictEqual(h.sessions, 1);
+    assert.ok(!h.cells.some(c => c.date === '2025-01-01'));
+  });
+
+  await t('shading is relative to the heaviest day, so it never saturates', () => {
+    // A light day next to a heavy one has to stay distinguishable — against a
+    // fixed threshold everything reads as full green once the weights climb.
+    const h = C.buildHeatmap([
+      w('2026-08-03', [10, 10, 10], 300),       // 9000
+      w('2026-07-29', [10, null, null], 100),   // 1000
+    ], '2026-08-04');
+    assert.strictEqual(h.cells.find(c => c.date === '2026-08-03').level, 4);
+    assert.strictEqual(h.cells.find(c => c.date === '2026-07-29').level, 1,
+      'a real session is shaded, never blank');
+  });
+
+  await t('levels cover the range without a gap', () => {
+    assert.strictEqual(C.levelFor(0, 100), 0);
+    assert.strictEqual(C.levelFor(25, 100), 1);
+    assert.strictEqual(C.levelFor(50, 100), 2);
+    assert.strictEqual(C.levelFor(75, 100), 3);
+    assert.strictEqual(C.levelFor(100, 100), 4);
+    assert.strictEqual(C.levelFor(5, 0), 1, 'volume with no max is still a session');
+  });
+
+  await t('the rate is per week, to one decimal', () => {
+    const h = C.buildHeatmap(
+      ['2026-08-03', '2026-07-29', '2026-07-27'].map(d => w(d)), '2026-08-04');
+    assert.strictEqual(h.sessions, 3);
+    assert.strictEqual(h.perWeek, 0.3, '3 in 12 weeks must not round away to 0');
+  });
+
+  await t('month labels start a new run only when the month changes', () => {
+    const h = C.buildHeatmap([], '2026-08-04');
+    const labels = h.months.map(m => m.label);
+    assert.deepStrictEqual(labels, [...new Set(labels)], 'no month may appear twice');
+    assert.strictEqual(h.months[0].week, 0);
+    assert.ok(h.months.length >= 3 && h.months.length <= 4);
+  });
+
+  await t('days are walked on the calendar, not by adding 86400000', () => {
+    // US DST springs forward on 2026-03-08. Adding a day by arithmetic lands at
+    // 23:00 on the 8th, which floors back to the 8th and shifts a whole column.
+    assert.strictEqual(C.dayStr(C.addDays(C.parseDay('2026-03-07'), 1)), '2026-03-08');
+    assert.strictEqual(C.dayStr(C.addDays(C.parseDay('2026-03-08'), 1)), '2026-03-09');
+    assert.strictEqual(C.dayStr(C.addDays(C.parseDay('2026-10-31'), 1)), '2026-11-01');
+  });
+
+  await t('a grid spanning a DST change still has seven days in every week', () => {
+    const h = C.buildHeatmap([], '2026-03-20');
+    assert.strictEqual(h.cells.length, 84);
+    for (let wk = 0; wk < 12; wk++) {
+      assert.strictEqual(h.cells.filter(c => c.week === wk).length, 7, `week ${wk}`);
+    }
+    assert.strictEqual([...new Set(h.cells.map(c => c.date))].length, 84,
+      'no date may repeat or go missing across the transition');
+  });
+
+  await t('an empty history still draws twelve empty weeks', () => {
+    const h = C.buildHeatmap([], '2026-08-04');
+    assert.strictEqual(h.sessions, 0);
+    assert.strictEqual(h.perWeek, 0);
+    assert.ok(h.cells.every(c => c.level === 0 && c.id === null));
+  });
+}
+
 /* ── 2. server / API ───────────────────────────────────────────────────── */
 
 const PORT = 3999;
@@ -258,6 +403,20 @@ async function server() {
     assert.deepStrictEqual(w.entries[0].sets, [12, 12, 12]);
   });
 
+  await t('the wire ships the calendar, so the client never buckets days itself', async () => {
+    const { body } = await api('GET', '/api/state');
+    const h = body.heatmap;
+    assert.ok(h, 'no heatmap on the wire');
+    assert.strictEqual(h.cells.length, 84);
+    assert.strictEqual(h.weeks, 12);
+    // The workouts logged above all happened today.
+    const today = h.cells.find(c => c.date === body.today);
+    assert.ok(today, "today must be in the window");
+    assert.ok(today.level > 0, 'a workout logged today should light its square');
+    assert.ok(today.id, 'and carry the id, so tapping it can find the card');
+    assert.ok(h.sessions >= 1);
+  });
+
   await t('the shell serves with a cache-busted asset stamp', async () => {
     const r = await fetch(BASE + '/');
     const html = await r.text();
@@ -307,6 +466,7 @@ async function server() {
 
 (async () => {
   await rules();
+  await calendarGrid();
   await server();
   console.log(`\n${pass} passed, ${fails.length} failed`);
   if (fails.length) { fails.forEach(f => console.log(`  · ${f}`)); process.exit(1); }

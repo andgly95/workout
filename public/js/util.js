@@ -46,31 +46,13 @@ export function showScreen(id) {
   if (sc) sc.scrollTop = 0;
 }
 
+// No-op on iOS Safari, which has never supported the Vibration API — the
+// scheduled tone in alarm.js is what actually reaches you there. Kept because
+// it costs nothing and is the better signal anywhere that does support it.
 export function buzz(pattern) {
   try { navigator.vibrate && navigator.vibrate(pattern); } catch (_) {}
 }
 
-// Short synthesized beep — no audio asset to ship or cache.
-let actx = null;
-export function beep(freq = 880, ms = 160, gain = 0.15) {
-  try {
-    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === 'suspended') actx.resume();
-    const o = actx.createOscillator();
-    const g = actx.createGain();
-    o.type = 'sine';
-    o.frequency.value = freq;
-    g.gain.setValueAtTime(gain, actx.currentTime);
-    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + ms / 1000);
-    o.connect(g); g.connect(actx.destination);
-    o.start(); o.stop(actx.currentTime + ms / 1000);
-  } catch (_) {}
-}
-
-// Called from the first user gesture so iOS lets us beep later.
-export function primeAudio() {
-  try {
-    actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === 'suspended') actx.resume();
-  } catch (_) {}
-}
+// Sound lives in alarm.js, which owns the one AudioContext: the end-of-rest
+// tone has to be SCHEDULED on the audio thread rather than played on demand,
+// and two contexts fighting over iOS's audio session would break exactly that.

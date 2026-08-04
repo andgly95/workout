@@ -1,8 +1,9 @@
 // The live workout: one exercise at a time, 3 sets, 90s rest.
 import { S, LS, saveLocal, loadLocal } from './state.js';
-import { $, esc, mmss, todayStr, toast, showScreen, buzz, beep, primeAudio } from './util.js';
+import { $, esc, mmss, todayStr, toast, showScreen, buzz } from './util.js';
 import { newWorkoutId, saveWorkout } from './sync.js';
 import { exName } from './home.js';
+import { primeAudio, scheduleAlarm, cancelAlarm, notify } from './alarm.js';
 
 const RING_C = 339.29; // 2πr for r=54
 
@@ -160,13 +161,17 @@ function logSet() {
   const nextLabel = lastSetOfEx
     ? `Next: <b>${esc(exName(s.entries[s.exIdx + 1].id))}</b>`
     : `Next: <b>Set ${s.setIdx + 2} of 3</b>`;
+  // The same thing again without markup, for the notification body.
+  const nextPlain = lastSetOfEx
+    ? `Next up: ${exName(s.entries[s.exIdx + 1].id)}`
+    : `Set ${s.setIdx + 2} of 3 · ${e.weight} lb`;
   startRest(nextLabel, () => {
     if (lastSetOfEx) { s.exIdx++; s.setIdx = 0; }
     else { s.setIdx++; }
     s.reps = cur().target;
     persist();
     renderSession();
-  });
+  }, undefined, nextPlain);
 }
 
 function skipExercise() {
@@ -197,26 +202,34 @@ async function finishSession() {
 
 /* ── rest timer ────────────────────────────────────────────────────────── */
 
-function startRest(nextLabel, done, durationSec) {
+function startRest(nextLabel, done, durationSec, plainLabel) {
   const total = durationSec || S.wire?.rules?.restSec || 90;
   const deadline = Date.now() + total * 1000;
   const pane = $('restPane');
   const ring = $('ringFg');
-  let beeped = false;
+  let fired = false;
 
   $('restNext').innerHTML = nextLabel;
   pane.hidden = false;
   pane.classList.remove('flash');
+
+  // Queue the alert on the audio thread NOW, not when the countdown reaches
+  // zero. By then this interval may not have run for a minute — on iOS it will
+  // not have run at all, because a backgrounded PWA is frozen outright.
+  scheduleAlarm(total);
 
   const paint = () => {
     const left = Math.max(0, (deadline - Date.now()) / 1000);
     $('restNum').textContent = Math.ceil(left);
     ring.style.strokeDashoffset = String(RING_C * (1 - left / total));
     if (left <= 5) pane.classList.add('flash');
-    if (left <= 0 && !beeped) {
-      beeped = true;
-      beep(880, 180); setTimeout(() => beep(1174, 220), 200);
+    if (left <= 0 && !fired) {
+      fired = true;
+      // No beep here — the alarm was scheduled up front and has already
+      // sounded. Beeping again would fire late, on whichever tick happens to
+      // run after you unlock the phone.
       buzz([120, 80, 120]);
+      notify('Rest over', plainLabel || 'Back to it');
       stopRest();
       done();
     }
@@ -229,13 +242,18 @@ function startRest(nextLabel, done, durationSec) {
   S.restExtend = () => {
     const left = Math.max(0, (deadline - Date.now()) / 1000);
     stopRest();
-    startRest(nextLabel, done, Math.round(left) + 30);
+    startRest(nextLabel, done, Math.round(left) + 30, plainLabel);
   };
 }
 
 function stopRest() {
   clearInterval(S.restTimer);
   S.restTimer = null;
+  // Skipping or extending has to unschedule the tone, or it goes off in the
+  // middle of the next set. The banner is NOT dismissed here: this runs
+  // immediately after raising it, and would race its own notification away.
+  // alarm.js clears it when you come back to the app instead.
+  cancelAlarm();
   const pane = $('restPane');
   if (pane) { pane.hidden = true; pane.classList.remove('flash'); }
 }
