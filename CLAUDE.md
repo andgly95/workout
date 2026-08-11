@@ -30,13 +30,44 @@ the server returned, and shows a pending state when offline):
 
 | Result | Next workout |
 |---|---|
-| all 3 sets ≥ **12** | weight **+5 lb**, target back to **8** |
+| all 3 sets ≥ **12** | weight **up one step**, target back to **8** |
 | all 3 sets ≥ target (8 or 10) | target **+2** |
-| any set **< 8** | **offer** a 5 lb drop — never automatic ("may be dropped") |
+| any set **< 8** | **offer** a one-step drop — never automatic ("may be dropped") |
 | otherwise | hold — repeat the same weight and target |
 
-So a lift climbs 8 → 10 → 12 → +5 lb → 8. `nextState()` is pure; every row above
-has a test in `test/test.js`.
+So a lift climbs 8 → 10 → 12 → heavier → 8. `nextState()` is pure; every row
+above has a test in `test/test.js`.
+
+### The step is per machine
+
+| | step |
+|---|---|
+| leg press | 20 |
+| chest press · low row · vertical traction · leg curl | 10 |
+| overhead press | 5 |
+
+A leg press stack has no 5 lb pin, and an overhead press climbing 20 at a time
+goes from liftable to impossible in one workout. `step` lives on each entry in
+`EXERCISES` and is read through **`stepFor(id)`**; `WEIGHT_STEP` (5) survives only
+as the fallback for an id that names none.
+
+- **The step is looked up by id, never stored on a logged entry.** How big a jump
+  a stack supports is a fact about the machine, not about the sets you did on it
+  — carrying a copy on every entry is how the two would come to disagree after a
+  machine is re-rated.
+- **`nextState(cur, sets, step)`** takes it as an argument rather than doing the
+  lookup, so the function stays pure and the whole existing truth table keeps
+  testing the default.
+- **The deload drops by the same step it climbs by**, and the floor moves with it:
+  `max(MIN_WEIGHT, step)`, so a leg press bottoms out at 20 rather than 5. At the
+  floor the note says so instead of offering a drop it can't make.
+- The client reads `exercises[].step` off the wire (`exStep()` in `home.js`) —
+  used by the in-session ± stepper and by the "+20 lb" pill on Today. It does not
+  keep a second table.
+- **Existing weights aren't on the new grid** (leg press sat at 165 from the old
+  +5 ladder, so it next lands on 185). Deliberately not snapped: guessing where a
+  stack's grid is anchored is worse than one manual adjust, and `/api/adjust` plus
+  the stepper already land on any real number.
 
 ## File map
 
@@ -68,6 +99,36 @@ test/
   client-check.js      — headless chromium: runs a full 15-set workout, fails on any JS error
 data/store.json        — live data (gitignored)
 ```
+
+## An occupied machine — walking away and coming back
+
+A gym is not a queue you control. **"Machine busy"** sends the current exercise to
+the back of that session's list and moves you to the next one; the **dots along the
+top are buttons**, so you can jump to any machine at any point. All of it lives in
+`public/js/session.js`.
+
+- **Busy is not skip.** Skipping says "not doing this today" and forfeits the
+  progression; busy keeps every set already logged and expects you back. Two
+  buttons, because they mean opposite things about your next prescription.
+- **The set you're on is DERIVED, not stored.** `nextSet(e)` is the first unlogged
+  slot on that entry. The session used to hold one `setIdx`, which was fine while
+  the order was fixed and is a bug the moment you can leave a machine half-done —
+  the set index belongs to the exercise, not to the session. Deriving it is what
+  makes coming back land on set 2 correctly, with no reconciliation.
+- **`nextIdx(from)` wraps.** That wrap is the whole "come back later" mechanism:
+  once everything after you is finished it walks round to the one you left. No
+  "deferred" flag exists, because position already says it.
+- **Dot state comes from the entry, never from its position.** "Everything left of
+  the cursor is done" stops being true the moment you can reorder or jump. A
+  part-done machine gets its own half-filled dot — that's the one you owe a visit.
+- **A reorder holds the ENTRY, not its index**, across the splice and across a rest
+  period. An index would point at whatever moved into that slot.
+- **The workout ends when every machine is spent**, not when you reach the end of
+  the array — after a reorder those are different things.
+- The reordered list is what gets posted, so a phone that dies mid-workout comes
+  back with the same queue. `applyProgression` iterates entries and is
+  order-independent; `plannedEntries()` always rebuilds in program order, because
+  the deferral was a fact about that afternoon, not a new plan.
 
 ## The rest alert — read this before touching the timer
 
@@ -157,6 +218,11 @@ state = {
 
 ## Key conventions
 
+- **Ordering lives in the client and is tested in the browser.** `lib/` is
+  CommonJS and `public/js/` is ESM with no build step, so the session queue can't
+  be a shared pure module the way `progression.js` is. `client-check.js` covers it
+  by driving the real UI: defer a machine, assert it moved and reads part-done,
+  tap its dot, assert it resumes on set 2.
 - **`lib/progression.js` and `lib/calendar.js` are pure and are the source of
   truth.** Don't mirror `nextState()` or the day bucketing into client code — the
   summary screen renders server outcomes and shows "will update when you're back

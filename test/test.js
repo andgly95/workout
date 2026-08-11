@@ -51,7 +51,7 @@ async function rules() {
     assert.strictEqual(r.weight, 80);
   });
 
-  await t('12/12/12 → +5 lb and target resets to 8', () => {
+  await t('12/12/12 → up one step and target resets to 8', () => {
     const r = P.nextState({ weight: 80, target: 12 }, [12, 12, 12]);
     assert.strictEqual(r.action, 'weight-up');
     assert.strictEqual(r.weight, 85);
@@ -104,16 +104,67 @@ async function rules() {
     assert.strictEqual(r.weight, 85);
   });
 
-  await t('full ladder: 140 lb leg press takes 3 workouts to reach 145', () => {
+  await t('full ladder: 140 lb leg press takes 3 workouts to reach 160', () => {
+    const step = P.stepFor('leg-press');
     let st = { weight: 140, target: 8 };
     const seen = [];
     for (let i = 0; i < 3; i++) {
       seen.push(`${st.weight}x${st.target}`);
-      const r = P.nextState(st, [st.target, st.target, st.target]);
+      const r = P.nextState(st, [st.target, st.target, st.target], step);
       st = { weight: r.weight, target: r.target };
     }
     assert.deepStrictEqual(seen, ['140x8', '140x10', '140x12']);
-    assert.deepStrictEqual(st, { weight: 145, target: 8 });
+    assert.deepStrictEqual(st, { weight: 160, target: 8 });
+  });
+
+  /* Every machine climbs by what its own stack supports. This is the table the
+     rest of the app reads — the client looks the step up rather than keeping a
+     second copy, so getting it wrong here is the only way to get it wrong. */
+
+  await t('each machine has the step its stack supports', () => {
+    assert.deepStrictEqual(
+      Object.fromEntries(P.EXERCISES.map(e => [e.id, P.stepFor(e.id)])),
+      {
+        'leg-press': 20,
+        'chest-press': 10,
+        'low-row': 10,
+        'lat-pulldown': 10,
+        'overhead': 5,
+        'leg-curl': 10,
+      });
+  });
+
+  await t('an unknown machine falls back to the global step', () => {
+    assert.strictEqual(P.stepFor('nonesuch'), P.WEIGHT_STEP);
+    assert.strictEqual(P.WEIGHT_STEP, 5);
+  });
+
+  await t('clearing 3x12 moves each machine by ITS step, not by five', () => {
+    const up = (id, w) =>
+      P.nextState({ weight: w, target: 12 }, [12, 12, 12], P.stepFor(id)).weight;
+    assert.strictEqual(up('leg-press', 165), 185);
+    assert.strictEqual(up('chest-press', 95), 105);
+    assert.strictEqual(up('low-row', 95), 105);
+    assert.strictEqual(up('lat-pulldown', 75), 85);
+    assert.strictEqual(up('overhead', 35), 40);
+    assert.strictEqual(up('leg-curl', 75), 85);
+  });
+
+  await t('a deload drops by the same step it climbs by', () => {
+    const r = P.nextState({ weight: 185, target: 8 }, [8, 6, 8], P.stepFor('leg-press'));
+    assert.strictEqual(r.action, 'suggest-deload');
+    assert.strictEqual(r.suggestWeight, 165, 'a leg press has no 5 lb pin either');
+    assert.strictEqual(r.canDrop, true);
+    assert.strictEqual(r.weight, 185, 'still never applied automatically');
+  });
+
+  await t('the floor is one of the machine\'s own increments', () => {
+    // 5 lb is not a leg press weight, so the floor moves up with the step.
+    const r = P.nextState({ weight: 20, target: 8 }, [3, 3, 3], 20);
+    assert.strictEqual(r.suggestWeight, 20);
+    assert.strictEqual(r.canDrop, false);
+    assert.ok(/as light as this machine goes/.test(r.note),
+      'at the floor it must not offer a drop it cannot make');
   });
 
   await t('a stalled lift repeats forever until the reps come', () => {
@@ -442,6 +493,51 @@ async function server() {
     };
     await walk('/js/app.js');
     assert.ok(seen.size >= 7, `expected the whole module graph, saw ${seen.size}`);
+  });
+
+  await t('the wire ships each machine\'s own step, so the client never guesses', async () => {
+    const { body } = await api('GET', '/api/state');
+    const steps = Object.fromEntries(body.exercises.map(e => [e.id, e.step]));
+    assert.strictEqual(steps['leg-press'], 20);
+    assert.strictEqual(steps['overhead'], 5);
+    assert.strictEqual(steps['chest-press'], 10);
+    assert.strictEqual(body.rules.weightStep, 5, 'the global one stays as the fallback');
+  });
+
+  await t('a finished workout advances each machine by ITS OWN step', async () => {
+    // Straight through the real route, because applyProgression looking the step
+    // up by id is exactly the wiring that could silently regress to a flat 5.
+    const { body: st } = await api('GET', '/api/state');
+    const before = {};
+    for (const p of st.planned) before[p.id] = p.weight;
+    const { body } = await api('POST', '/api/workout', {
+      id: 'w-steps',
+      // 12s across the board — every machine earns a weight jump at once.
+      entries: st.planned.map(p => ({ ...p, target: 12, sets: [12, 12, 12] })),
+      done: true,
+    });
+    const after = body.state.progress;
+    for (const p of st.planned) {
+      const step = p.id === 'leg-press' ? 20 : p.id === 'overhead' ? 5 : 10;
+      assert.strictEqual(after[p.id].weight, before[p.id] + step,
+        `${p.id} should climb by ${step}`);
+      assert.strictEqual(after[p.id].target, 8, 'and drop back to 8 reps');
+    }
+  });
+
+  await t('a workout can be logged in a different order than it was planned', async () => {
+    // "Machine busy" reorders the session's own copy of the entries, so the
+    // reordered list is what gets posted. Progression must not care.
+    const { body: st } = await api('GET', '/api/state');
+    const shuffled = [...st.planned].reverse().map(p => ({ ...p, sets: [8, 8, 8] }));
+    const { body } = await api('POST', '/api/workout', {
+      id: 'w-reorder', entries: shuffled, done: true,
+    });
+    assert.strictEqual(body.outcomes.length, shuffled.length,
+      'every machine should still get an outcome');
+    for (const o of body.outcomes) assert.strictEqual(o.action, 'reps-up');
+    assert.strictEqual(body.state.progress['leg-press'].target, 10,
+      'the last machine performed is still the leg press record');
   });
 
   await t('data survives a restart', async () => {

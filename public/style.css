@@ -57,6 +57,14 @@ small{font-size:12px}
   width:100%;color:var(--dim);padding:12px;font-size:14px;margin-top:8px;
 }
 .ghost:active{color:var(--txt)}
+.ghost[hidden]{display:none}
+/* Two ways out of a machine, side by side: it's taken, or you're not doing it. */
+.alt-row{display:flex;gap:8px}
+/* The pad has nothing to log once every set is in — leave the button, which
+   becomes the way on to the next machine. */
+.rep-pad.spent .rep-label,
+.rep-pad.spent .rep-input,
+.rep-pad.spent .rep-chips{display:none}
 
 /* ─── home ─────────────────────────────────────────────────────────────── */
 .streak-row{display:flex;gap:8px;margin-bottom:14px}
@@ -102,11 +110,18 @@ small{font-size:12px}
 /* ─── session ──────────────────────────────────────────────────────────── */
 .session-top{border-bottom:1px solid var(--line)}
 .elapsed{font-variant-numeric:tabular-nums;color:var(--dim);font-size:13px;width:40px;text-align:right}
-.ex-dots{display:flex;gap:5px;flex:1;justify-content:center}
-.ex-dots i{width:7px;height:7px;border-radius:99px;background:var(--card2);display:block}
+/* Each dot is a button: tapping one jumps to that machine, which is how you get
+   back to the one you walked away from. The dot stays 7px — the button around it
+   is what your thumb actually hits. */
+.ex-dots{display:flex;gap:0;flex:1;justify-content:center}
+.ex-dots .dotbtn{padding:11px 4px;display:grid;place-items:center;flex:none}
+.ex-dots i{width:7px;height:7px;border-radius:99px;background:var(--card2);display:block;
+  transition:transform .15s ease}
 .ex-dots i.done{background:var(--accent)}
 .ex-dots i.cur{background:var(--txt);transform:scale(1.35)}
 .ex-dots i.skip{background:var(--card2);opacity:.4}
+/* Half-filled: sets logged but not finished — the machine you have to go back to. */
+.ex-dots i.part{background:linear-gradient(90deg,var(--accent) 50%,var(--card2) 50%)}
 
 .session-body{display:flex;flex-direction:column}
 .ex-head{text-align:center;margin:8px 0 4px}

@@ -145,9 +145,10 @@ function connectCdp(wsUrl) {
         return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); })()`);
     check(!(await visible('restPane')), 'rest overlay is covering the session screen');
 
-    // Weight stepper.
+    // Weight stepper — one notch is the MACHINE's step, so the leg press moves 20.
     await evalJs(`document.getElementById('wUp').click()`);
-    check(await evalJs(`document.getElementById('exWeight').innerText`) === '145', 'weight + failed');
+    check(await evalJs(`document.getElementById('exWeight').innerText`) === '160',
+      'the stepper should move the leg press by its own 20 lb increment');
     await evalJs(`document.getElementById('wDown').click()`);
     check(await evalJs(`document.getElementById('exWeight').innerText`) === '140', 'weight − failed');
 
@@ -167,16 +168,65 @@ function connectCdp(wsUrl) {
       return m.alarmPending();
     })()`);
 
-    for (let i = 0; i < 15; i++) {
-      const last = i === 14;
+    const exNow = () => evalJs(`document.getElementById('exName').innerText`);
+    const subNow = () => evalJs(`document.getElementById('exSub').innerText`);
+    const dotStates = () => evalJs(
+      `Array.from(document.querySelectorAll('#exDots .dotbtn i')).map(i => i.className)`);
+    const dotNames = () => evalJs(
+      `Array.from(document.querySelectorAll('#exDots .dotbtn')).map(b => b.getAttribute('aria-label'))`);
+    const inSession = () => evalJs(`document.getElementById('scr-session').classList.contains('active')`);
+
+    // One set of Leg Press, then the machine gets taken.
+    await evalJs(`document.getElementById('btnLogSet').click()`);
+    await sleep(250);
+    check(await visible('restPane'), 'rest pane did not open after the first set');
+    check(await alarmPending() === true,
+      'starting a rest did not schedule the alert on the audio thread');
+    await evalJs(`document.getElementById('btnSkipRest').click()`);
+    await sleep(200);
+    check(!(await visible('restPane')), 'rest pane did not close');
+    check(await alarmPending() === false,
+      'skipping rest must unschedule the tone, or it fires mid-set');
+
+    // ── the occupied machine ────────────────────────────────────────────
+    // "Machine busy" sends it to the back of the queue and moves you on. It must
+    // NOT count as skipped: the set already logged has to survive.
+    check(/Leg Press/.test(await exNow()), 'should still be on Leg Press');
+    await evalJs(`document.getElementById('btnBusy').click()`);
+    await sleep(300);
+    check(/Chest Press/.test(await exNow()),
+      `busy should move on to the next machine, got ${await exNow()}`);
+    const names = await dotNames();
+    check(/Leg Press/.test(names[names.length - 1]),
+      `the busy machine should be last in the queue, got ${names.join(', ')}`);
+    // Half-finished is its own state — that is the dot you have to come back to.
+    check((await dotStates()).includes('part'),
+      'a machine with sets logged but unfinished should read as part-done');
+
+    // ── going back to it, at any point ──────────────────────────────────
+    // Tapping its dot jumps straight there, and it must resume on set 2 — which
+    // only works because the set index is derived from the entry, not stored on
+    // the session.
+    await evalJs(`Array.from(document.querySelectorAll('#exDots .dotbtn')).pop().click()`);
+    await sleep(300);
+    check(/Leg Press/.test(await exNow()), 'tapping a dot did not jump to that machine');
+    check(/Set 2 of 3/.test(await subNow()),
+      `coming back should resume on set 2, got: ${await subNow()}`);
+    // And back out again to carry on where we were.
+    await evalJs(`document.querySelectorAll('#exDots .dotbtn')[0].click()`);
+    await sleep(300);
+    check(/Chest Press/.test(await exNow()), 'jumping back to the first dot failed');
+
+    // Log everything that's left, in whatever order the queue ended up in.
+    // Driving it by "is the session still open" rather than a fixed 15 is what
+    // makes this test survive a reorder at all.
+    let logged = 1;
+    for (let i = 0; i < 30 && await inSession(); i++) {
       await evalJs(`document.getElementById('btnLogSet').click()`);
       await sleep(250);
-      if (last) break;
-      check(await visible('restPane'), `rest pane did not open after set ${i + 1}`);
-      if (i === 0) {
-        check(await alarmPending() === true,
-          'starting a rest did not schedule the alert on the audio thread');
-      }
+      logged++;
+      if (!(await inSession())) break;
+      if (!(await visible('restPane'))) continue;   // moved on without resting
       if (i === 1) {
         // +30s tears the rest down and rebuilds it. If it forgot to re-queue the
         // tone you would get a silent rest and no way to tell until the gym.
@@ -187,11 +237,8 @@ function connectCdp(wsUrl) {
       await evalJs(`document.getElementById('btnSkipRest').click()`);
       await sleep(200);
       check(!(await visible('restPane')), `rest pane did not close after set ${i + 1}`);
-      if (i === 0) {
-        check(await alarmPending() === false,
-          'skipping rest must unschedule the tone, or it fires mid-set');
-      }
     }
+    check(logged === 15, `expected 15 sets across 5 machines, logged ${logged}`);
 
     await sleep(900);
     check(await evalJs(`document.getElementById('scr-done').classList.contains('active')`), 'summary screen did not open');

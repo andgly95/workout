@@ -2,7 +2,7 @@
 import { S, LS, saveLocal, loadLocal } from './state.js';
 import { $, esc, mmss, todayStr, toast, showScreen, buzz } from './util.js';
 import { newWorkoutId, saveWorkout } from './sync.js';
-import { exName } from './home.js';
+import { exName, exStep } from './home.js';
 import { primeAudio, scheduleAlarm, cancelAlarm, notify } from './alarm.js';
 
 const RING_C = 339.29; // 2πr for r=54
@@ -48,7 +48,6 @@ export function startSession() {
       startedAt: Date.now(),
       entries: planned,
       exIdx: 0,
-      setIdx: 0,
       reps: planned[0].target,
     };
     persist();
@@ -93,9 +92,43 @@ function startElapsed() {
 }
 function stopElapsed() { clearInterval(S.tickTimer); S.tickTimer = null; }
 
-/* ── render ────────────────────────────────────────────────────────────── */
+/* ── where you are ─────────────────────────────────────────────────────
+   The current machine is an index into `entries`; WHICH SET you're on is
+   derived from what that machine has logged. Keeping a session-level
+   `setIdx` was fine while the order was fixed, but the moment you can walk
+   away from a half-finished machine and come back it is a bug — the set
+   you're up to belongs to the exercise, not to the session. Derive it and
+   coming back is correct by construction. */
 
 function cur() { return S.session.entries[S.session.exIdx]; }
+
+// The set to log next, or -1 when this machine is finished with.
+const nextSet = (e) => e.sets.findIndex(v => v === null);
+const spent = (e) => e.skipped || nextSet(e) === -1;
+const allSpent = () => S.session.entries.every(spent);
+
+// The next machine that still has work, from `from` onwards, WRAPPING. The wrap
+// is what makes "come back later" need no extra state: once everything after
+// you is done it walks round to the one you left behind.
+function nextIdx(from) {
+  const en = S.session.entries, n = en.length;
+  for (let k = 0; k < n; k++) {
+    const i = (((from + k) % n) + n) % n;
+    if (!spent(en[i])) return i;
+  }
+  return -1;
+}
+
+function goTo(i) {
+  const s = S.session;
+  if (i < 0 || i >= s.entries.length) return;
+  s.exIdx = i;
+  s.reps = cur().target;
+  persist();
+  renderSession();
+}
+
+/* ── render ────────────────────────────────────────────────────────────── */
 
 export function renderSession() {
   const s = S.session;
@@ -103,25 +136,49 @@ export function renderSession() {
   const e = cur();
   if (!e) return finishSession();
 
+  const set = nextSet(e);
+  const done = spent(e);
+
   $('exName').textContent = exName(e.id);
-  $('exSub').textContent = `Set ${s.setIdx + 1} of 3 · target ${e.target} reps`;
+  $('exSub').textContent = e.skipped ? 'Skipped'
+    : set === -1 ? 'All 3 sets logged'
+    : `Set ${set + 1} of 3 · target ${e.target} reps`;
   $('exWeight').textContent = e.weight;
 
+  // Each dot's state comes from its own ENTRY, never from its position. Once the
+  // order can change and you can jump backwards, "everything left of the cursor
+  // is finished" stops being true — and a half-done machine deserves to look
+  // different from an untouched one, since that is the one you have to return to.
   $('exDots').innerHTML = s.entries.map((en, i) => {
-    const cls = en.skipped ? 'skip'
-      : i < s.exIdx ? 'done'
-      : i === s.exIdx ? 'cur' : '';
-    return `<i class="${cls}"></i>`;
+    const logged = en.sets.filter(v => v !== null).length;
+    const cls = i === s.exIdx ? 'cur'
+      : en.skipped ? 'skip'
+      : logged === 3 ? 'done'
+      : logged > 0 ? 'part' : '';
+    return `<button class="dotbtn" data-jump="${i}"
+      aria-label="${esc(exName(en.id))}"><i class="${cls}"></i></button>`;
   }).join('');
+  // Tapping a dot is "go back to that one, now" — the other half of being able
+  // to walk away from an occupied machine.
+  $('exDots').querySelectorAll('[data-jump]').forEach(b => {
+    b.addEventListener('click', () => goTo(Number(b.dataset.jump)));
+  });
 
   $('setRows').innerHTML = e.sets.map((v, i) => {
-    const state = v === null ? (i === s.setIdx ? 'cur' : '')
+    const state = v === null ? (i === set ? 'cur' : '')
       : v >= e.target ? 'hit' : 'miss';
     return `<div class="set-row ${state}">
       <span>Set ${i + 1}</span>
       <b class="${v === null ? 'empty' : ''}">${v === null ? '–' : v}</b>
     </div>`;
   }).join('');
+
+  // Nothing left to log here: the pad has no job, and the button becomes the way
+  // on rather than a control that would silently do nothing.
+  $('repPad').classList.toggle('spent', done);
+  $('btnLogSet').textContent = done ? 'Next machine' : 'Log set';
+  $('btnBusy').hidden = done;
+  $('btnSkipEx').hidden = done;
 
   const r = s.reps ?? e.target;
   $('repVal').textContent = r;
@@ -147,31 +204,60 @@ function setReps(n) {
 function logSet() {
   const s = S.session;
   const e = cur();
-  e.sets[s.setIdx] = s.reps ?? e.target;
+  const set = nextSet(e);
+  // Standing on a machine that's already finished — the button says "Next
+  // machine" and this is what it does.
+  if (set === -1 || e.skipped) {
+    if (allSpent()) return finishSession();
+    return goTo(nextIdx(s.exIdx + 1));
+  }
+
+  e.sets[set] = s.reps ?? e.target;
   persist();
   saveWorkout(snapshot(false)); // fire-and-forget; queued if offline
 
-  const lastSetOfEx = s.setIdx >= 2;
-  const lastEx = s.exIdx >= s.entries.length - 1;
+  // The workout ends when every machine is spent, not when you reach the end of
+  // the list — after a reorder those are different things.
+  if (allSpent()) return finishSession();
 
-  if (lastSetOfEx && lastEx) return finishSession();
+  // Hold the next ENTRY, not its index: the list can be reordered while you rest
+  // and an index would then point at whatever moved into that slot.
+  const moveOn = spent(e) ? s.entries[nextIdx(s.exIdx + 1)] : null;
 
   // Show the completed set state, then rest.
   renderSession();
-  const nextLabel = lastSetOfEx
-    ? `Next: <b>${esc(exName(s.entries[s.exIdx + 1].id))}</b>`
-    : `Next: <b>Set ${s.setIdx + 2} of 3</b>`;
+  const nextLabel = moveOn
+    ? `Next: <b>${esc(exName(moveOn.id))}</b>`
+    : `Next: <b>Set ${set + 2} of 3</b>`;
   // The same thing again without markup, for the notification body.
-  const nextPlain = lastSetOfEx
-    ? `Next up: ${exName(s.entries[s.exIdx + 1].id)}`
-    : `Set ${s.setIdx + 2} of 3 · ${e.weight} lb`;
+  const nextPlain = moveOn
+    ? `Next up: ${exName(moveOn.id)}`
+    : `Set ${set + 2} of 3 · ${e.weight} lb`;
   startRest(nextLabel, () => {
-    if (lastSetOfEx) { s.exIdx++; s.setIdx = 0; }
-    else { s.setIdx++; }
-    s.reps = cur().target;
-    persist();
-    renderSession();
+    if (moveOn) goTo(s.entries.indexOf(moveOn));
+    else { s.reps = e.target; persist(); renderSession(); }
   }, undefined, nextPlain);
+}
+
+// Occupied. Send this machine to the back of the queue and carry on with the
+// next one — it keeps whatever sets are already logged against it, so coming
+// back picks up exactly where you left off. Deliberately NOT `skipped`: skipping
+// says "not doing this today" and forfeits the progression.
+function busyExercise() {
+  const s = S.session;
+  const e = cur();
+  const target = nextIdx(s.exIdx + 1);
+  if (target === -1 || target === s.exIdx) {
+    return toast('Nothing else left — this is the last machine');
+  }
+  const moveOn = s.entries[target];
+  s.entries.splice(s.exIdx, 1);
+  s.entries.push(e);
+  goTo(s.entries.indexOf(moveOn));
+  // The reorder is part of the snapshot, so a phone that dies mid-workout comes
+  // back with the same queue.
+  saveWorkout(snapshot(false));
+  toast(`${exName(e.id)} moved to the end — come back to it`);
 }
 
 function skipExercise() {
@@ -181,10 +267,8 @@ function skipExercise() {
   e.sets = [null, null, null];
   persist();
   saveWorkout(snapshot(false));
-  if (s.exIdx >= s.entries.length - 1) return finishSession();
-  s.exIdx++; s.setIdx = 0; s.reps = cur().target;
-  persist();
-  renderSession();
+  if (allSpent()) return finishSession();
+  goTo(nextIdx(s.exIdx));
 }
 
 async function finishSession() {
@@ -264,12 +348,15 @@ export function initSession(finishCb, quitCb) {
   onFinish = finishCb;
 
   $('btnLogSet').addEventListener('click', logSet);
+  $('btnBusy').addEventListener('click', busyExercise);
   $('btnSkipEx').addEventListener('click', skipExercise);
   $('rUp').addEventListener('click', () => setReps((S.session?.reps ?? 8) + 1));
   $('rDown').addEventListener('click', () => setReps((S.session?.reps ?? 8) - 1));
 
-  $('wUp').addEventListener('click', () => bumpWeight(5));
-  $('wDown').addEventListener('click', () => bumpWeight(-5));
+  // One notch is whatever this machine's stack supports — 20 on the leg press,
+  // 5 on the overhead press.
+  $('wUp').addEventListener('click', () => bumpWeight(1));
+  $('wDown').addEventListener('click', () => bumpWeight(-1));
 
   $('btnSkipRest').addEventListener('click', () => S.restSkip && S.restSkip());
   $('btnAddRest').addEventListener('click', () => S.restExtend && S.restExtend());
@@ -277,11 +364,11 @@ export function initSession(finishCb, quitCb) {
   $('btnQuit').addEventListener('click', quitCb);
 }
 
-function bumpWeight(d) {
+function bumpWeight(notches) {
   const s = S.session;
   if (!s) return;
   const e = cur();
-  e.weight = Math.max(0, e.weight + d);
+  e.weight = Math.max(0, e.weight + notches * exStep(e.id));
   persist();
   $('exWeight').textContent = e.weight;
   $('exWeight').parentElement.classList.remove('pop');

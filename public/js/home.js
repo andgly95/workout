@@ -12,6 +12,12 @@ export function exShort(id) {
   const e = (S.wire?.exercises || []).find(x => x.id === id);
   return e && e.short ? e.short : null;
 }
+// How much this machine moves in one notch. The server owns the number — the
+// client looks it up rather than keeping a second table that could drift.
+export function exStep(id) {
+  const e = (S.wire?.exercises || []).find(x => x.id === id);
+  return (e && e.step) || S.wire?.rules?.weightStep || 5;
+}
 
 function doneWorkouts() {
   return (S.wire?.workouts || []).filter(w => w.done);
@@ -57,7 +63,7 @@ export function renderHome() {
   const planned = S.wire.planned || [];
   $('todayList').innerHTML = planned.map(p => {
     const act = outcomes[p.id];
-    const pill = act === 'weight-up' ? '<span class="pill up">+5 lb</span>'
+    const pill = act === 'weight-up' ? `<span class="pill up">+${exStep(p.id)} lb</span>`
       : act === 'reps-up' ? '<span class="pill up">+2 reps</span>'
       : act === 'suggest-deload' ? '<span class="pill down">missed</span>'
       : act === 'hold' ? '<span class="pill hold">repeat</span>' : '';

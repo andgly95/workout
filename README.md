@@ -13,12 +13,14 @@ Three sets, ninety seconds' rest, 8–12 reps, on the same machines every time.
 
 | Result | Next workout |
 |---|---|
-| all three sets at **12** | weight **+5 lb**, target back to **8** |
+| all three sets at **12** | weight **up one step**, target back to **8** |
 | all three sets at target (8 or 10) | target **+2** |
-| any set below **8** | **offers** a 5 lb drop — never automatic |
+| any set below **8** | **offers** a one-step drop — never automatic |
 | otherwise | repeat the same weight and target |
 
-So a lift climbs 8 → 10 → 12 → +5 lb → 8. The rules live in exactly one place,
+So a lift climbs 8 → 10 → 12 → heavier → 8. The step is **per machine**, because
+the stacks differ: leg press 20, chest press / low row / vertical traction / leg
+curl 10, overhead press 5. The rules live in exactly one place,
 `lib/progression.js`, as pure functions with a test for every row above. The
 client renders what the server returned rather than reimplementing them.
 
@@ -28,6 +30,9 @@ client renders what the server returned rather than reimplementing them.
   server when it reconnects. The client mints workout IDs, so a replayed offline
   save updates the workout instead of duplicating it, and progression applies
   exactly once — a bad connection can't double-advance your weights.
+- **A machine can be occupied.** "Machine busy" sends that one to the back of the
+  queue keeping whatever sets you already logged, and the dots along the top jump
+  you to any machine at any point — so you come back and resume on the right set.
 - Screen wake-lock during a session.
 - Installable PWA.
 
