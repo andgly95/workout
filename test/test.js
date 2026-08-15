@@ -540,6 +540,89 @@ async function server() {
       'the last machine performed is still the leg press record');
   });
 
+  /* Undoing an accidental skip. A skip means "no signal" — applyProgression
+     steps over it — so one mis-tap silently costs that machine its advance.
+     Putting it back has to move the prescription too, but only when nothing
+     later has already spoken for that exercise. */
+
+  await t('un-skipping puts the sets back and catches the prescription up', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const target = st.planned.find(p => p.id === 'low-row').target;
+    const entries = st.planned.map(p => p.id === 'low-row'
+      ? { ...p, skipped: true, sets: [null, null, null] }
+      : { ...p, sets: [p.target, p.target, p.target] });
+    await api('POST', '/api/workout', { id: 'w-skip', entries, done: true });
+
+    const { body: mid } = await api('GET', '/api/state');
+    assert.strictEqual(mid.progress['low-row'].target, target,
+      'a skipped lift must not move on its own');
+
+    const { body } = await api('POST', '/api/workout/w-skip/unskip', {
+      id: 'low-row', sets: [target, target, target],
+    });
+    assert.strictEqual(body.outcome.action, 'reps-up');
+    assert.strictEqual(body.outcome.appliedToPlan, true);
+    assert.strictEqual(body.state.progress['low-row'].target, target + 2,
+      'the prescription has to catch up, or the correction is cosmetic');
+    const w = body.state.workouts.find(x => x.id === 'w-skip');
+    const en = w.entries.find(e => e.id === 'low-row');
+    assert.strictEqual(en.skipped, false);
+    assert.deepStrictEqual(en.sets, [target, target, target]);
+    assert.ok(w.outcomes.some(o => o.id === 'low-row'), 'the record gains its outcome');
+    assert.strictEqual(w.outcomes.length, w.entries.length,
+      'and keeps one outcome per entry, in entry order');
+  });
+
+  await t('un-skipping an OLD workout fixes the record but not the weight', async () => {
+    // The later workout is what set the current prescription. Correcting an
+    // older one must not wind it back to what it would have been at the time.
+    const { body: st } = await api('GET', '/api/state');
+    const plan = st.planned.find(p => p.id === 'overhead');
+    await api('POST', '/api/workout', {
+      id: 'w-old', date: '2020-01-06', startedAt: 1578300000000, done: true,
+      entries: st.planned.map(p => p.id === 'overhead'
+        ? { ...p, skipped: true, sets: [null, null, null] }
+        : { ...p, sets: [null, null, null], skipped: true }),
+    });
+    const before = JSON.stringify(st.progress['overhead']);
+    const { body } = await api('POST', '/api/workout/w-old/unskip', {
+      id: 'overhead', sets: [12, 12, 12],
+    });
+    assert.strictEqual(body.outcome.appliedToPlan, false, 'it must say it did not apply');
+    assert.strictEqual(JSON.stringify(body.state.progress['overhead']), before,
+      'a newer workout owns the current weight');
+    const en = body.state.workouts.find(x => x.id === 'w-old').entries
+      .find(e => e.id === 'overhead');
+    assert.strictEqual(en.skipped, false, 'the record is still corrected');
+    assert.deepStrictEqual(en.sets, [12, 12, 12]);
+  });
+
+  await t('un-skip refuses the cases that would corrupt a record', async () => {
+    const bad = async (id, body, code) => {
+      const { status } = await api('POST', `/api/workout/${id}/unskip`, body);
+      assert.strictEqual(status, code, `${id} ${JSON.stringify(body)}`);
+    };
+    await bad('nope', { id: 'low-row', sets: [8, 8, 8] }, 404);
+    await bad('w-skip', { id: 'nonesuch', sets: [8, 8, 8] }, 404);
+    // Already un-skipped — a second call would re-apply the progression again.
+    await bad('w-skip', { id: 'low-row', sets: [8, 8, 8] }, 400);
+
+    // All blank is a skip by another name. Needs a genuinely skipped entry, or
+    // this passes on the "not skipped" guard and tests nothing.
+    const { body: st } = await api('GET', '/api/state');
+    await api('POST', '/api/workout', {
+      id: 'w-blank', done: true,
+      entries: st.planned.map(p => p.id === 'lat-pulldown'
+        ? { ...p, skipped: true, sets: [null, null, null] }
+        : { ...p, sets: [p.target, p.target, p.target] }),
+    });
+    await bad('w-blank', { id: 'lat-pulldown', sets: [null, null, null] }, 400);
+    const { body: after } = await api('GET', '/api/state');
+    assert.strictEqual(
+      after.workouts.find(x => x.id === 'w-blank').entries.find(e => e.id === 'lat-pulldown').skipped,
+      true, 'a refused un-skip must leave the entry exactly as it was');
+  });
+
   await t('data survives a restart', async () => {
     const { body: before } = await api('GET', '/api/state');
     child.kill('SIGTERM');

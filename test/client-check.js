@@ -217,6 +217,25 @@ function connectCdp(wsUrl) {
     await sleep(300);
     check(/Chest Press/.test(await exNow()), 'jumping back to the first dot failed');
 
+    // Skip one machine outright, so history has an accidental skip to undo later.
+    // Undo it once in-session first — a skipped machine used to be a dead end you
+    // could jump to and not get out of.
+    check(/Chest Press/.test(await exNow()), 'expected to be on Chest Press');
+    await evalJs(`document.getElementById('btnSkipEx').click()`);
+    await sleep(300);
+    await evalJs(`document.querySelectorAll('#exDots .dotbtn')[0].click()`);
+    await sleep(300);
+    check(/Chest Press/.test(await exNow()), 'could not jump back to the skipped machine');
+    check(await visible('btnUnskip'), 'a skipped machine must offer a way back');
+    await evalJs(`document.getElementById('btnUnskip').click()`);
+    await sleep(300);
+    check(/Set 1 of 3/.test(await subNow()),
+      `undoing a skip should hand the machine back on set 1, got: ${await subNow()}`);
+    check(!(await visible('btnUnskip')), 'undo should go away once it is undone');
+    // Now skip it for real and leave it that way.
+    await evalJs(`document.getElementById('btnSkipEx').click()`);
+    await sleep(300);
+
     // Log everything that's left, in whatever order the queue ended up in.
     // Driving it by "is the session still open" rather than a fixed 15 is what
     // makes this test survive a reorder at all.
@@ -238,7 +257,7 @@ function connectCdp(wsUrl) {
       await sleep(200);
       check(!(await visible('restPane')), `rest pane did not close after set ${i + 1}`);
     }
-    check(logged === 15, `expected 15 sets across 5 machines, logged ${logged}`);
+    check(logged === 12, `expected 12 sets across 4 machines (one skipped), logged ${logged}`);
 
     await sleep(900);
     check(await evalJs(`document.getElementById('scr-done').classList.contains('active')`), 'summary screen did not open');
@@ -283,6 +302,36 @@ function connectCdp(wsUrl) {
       'tapping a day did not highlight its workout');
     check(/a week/.test(await evalJs(`document.querySelector('#calWrap .hm-foot').innerText`)),
       'the calendar should report the per-week rate');
+
+    // ── undoing that skip, after the fact ───────────────────────────────
+    // The whole point is that the prescription catches up: a skip is "no signal"
+    // and silently costs that machine its advance, so a repair that only edited
+    // the record would be cosmetic.
+    const chestTarget = () => evalJs(
+      `(async () => (await (await fetch('/api/state')).json())
+        .planned.find(p => p.id === 'chest-press').target)()`);
+    const chestBefore = await chestTarget();
+    check(await visible('historyList'), 'history list is not on screen');
+    check(await evalJs(`document.querySelectorAll('#historyList [data-fix]').length`) === 1,
+      'the skipped lift should be the one tappable line in history');
+    await evalJs(`document.querySelector('#historyList [data-fix]').click()`);
+    await sleep(300);
+    check(await visible('fixPane'), 'the fix sheet did not open');
+    check(/Chest Press/.test(await evalJs(`document.getElementById('fixTitle').innerText`)),
+      'the fix sheet named the wrong machine');
+    check(await evalJs(`document.querySelectorAll('#fixSets .fix-row').length`) === 3,
+      'expected one stepper per set');
+    // It defaults to what was prescribed, so the usual repair is a single tap.
+    check(await evalJs(`document.querySelector('#fixSets .fix-row b').innerText`) === String(chestBefore),
+      'the sets should default to the target that was prescribed');
+    await evalJs(`document.getElementById('fixSave').click()`);
+    await sleep(700);
+    check(!(await visible('fixPane')), 'the fix sheet did not close');
+    check(await evalJs(`document.querySelectorAll('#historyList [data-fix]').length`) === 0,
+      'the line should stop reading as skipped once it is fixed');
+    const chestAfter = await chestTarget();
+    check(chestAfter === chestBefore + 2,
+      `the prescription must catch up: ${chestBefore} -> ${chestAfter}`);
 
     await evalJs(`document.getElementById('btnBackHome').click()`);
     await sleep(300);

@@ -90,6 +90,7 @@
           <button class="ghost" id="btnBusy">Machine busy</button>
           <button class="ghost" id="btnSkipEx">Skip exercise</button>
         </div>
+        <button class="ghost" id="btnUnskip" hidden>Undo skip — I did do this one</button>
       </div>
     </div>
 
@@ -142,6 +143,19 @@
     </div>
   </section>
 
+</div>
+
+<!-- Correcting an accidental skip on a workout that's already logged. -->
+<div id="fixPane" class="modal" hidden>
+  <div class="modal-in">
+    <div class="modal-hd">
+      <b id="fixTitle">—</b>
+      <span id="fixSub">—</span>
+    </div>
+    <div class="fix-sets" id="fixSets"></div>
+    <button class="primary big" id="fixSave">Put it back on the record</button>
+    <button class="ghost" id="fixCancel">Cancel</button>
+  </div>
 </div>
 
 <div id="toast" class="toast" hidden></div>

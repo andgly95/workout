@@ -272,6 +272,45 @@ small{font-size:12px}
 .chart .cv b{color:var(--txt)}
 .empty-note{text-align:center;color:var(--dim);padding:40px 20px;font-size:14px}
 
+/* ─── fixing a skip after the fact ─────────────────────────────────────── */
+.modal{
+  position:fixed;inset:0;background:rgba(14,17,22,.92);backdrop-filter:blur(8px);
+  display:grid;place-items:center;z-index:70;padding:20px;
+}
+/* an author `display` beats the UA rule for [hidden] — restore it explicitly */
+.modal[hidden]{display:none}
+.modal-in{width:min(360px,100%)}
+.modal-hd{text-align:center;margin-bottom:22px}
+.modal-hd b{display:block;font-size:23px;font-weight:750;letter-spacing:-.03em}
+.modal-hd span{display:block;color:var(--dim);font-size:13.5px;margin-top:4px}
+.fix-sets{display:flex;flex-direction:column;gap:10px;margin-bottom:22px}
+.fix-row{
+  display:flex;align-items:center;gap:14px;
+  background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 14px;
+}
+.fix-row>span{
+  flex:1;color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;
+}
+.fix-row>b{
+  min-width:44px;text-align:center;font-size:26px;font-weight:750;
+  font-variant-numeric:tabular-nums;letter-spacing:-.02em;
+}
+/* A set you never did reads as a dash, not a zero — zero is a set you failed. */
+.fix-row>b.none{color:var(--dim);font-weight:400}
+.rbtn.sm{width:42px;height:42px;font-size:22px}
+
+/* The one line in the history list you might need to change is the one that's
+   tappable — a skip is the only thing there you can get wrong by a mis-tap. */
+.h-line.skipped{
+  width:100%;display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+  /* NOT `font:inherit` — the shorthand resets font-size to the card's, and this
+     selector outranks `.h-line`, so the line silently rendered a size larger
+     than the ones either side of it. Match the row explicitly. */
+  text-align:left;font-family:inherit;font-size:13.5px;padding:3px 0;
+}
+.h-line.skipped i{color:var(--accent);opacity:.9;font-style:normal;font-size:12px}
+.h-line.skipped:active{opacity:.6}
+
 /* ─── misc ─────────────────────────────────────────────────────────────── */
 .toast{
   position:fixed;left:50%;bottom:calc(var(--safe-b) + 84px);transform:translateX(-50%);

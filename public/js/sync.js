@@ -78,6 +78,19 @@ export async function adjust(id, patch) {
   } catch (_) { return false; }
 }
 
+// Undo a skip on a workout that's already logged. Deliberately NOT queued
+// offline: the queue's contract is "latest full snapshot per workout id", and a
+// correction that has to merge with whatever the server holds doesn't fit it.
+// Fails loudly instead, which is the honest answer for a repair you're making
+// at a desk rather than mid-set in a basement.
+export async function unskipEntry(workoutId, id, sets) {
+  try {
+    const res = await post(`/api/workout/${workoutId}/unskip`, { id, sets });
+    applyWire(res.state);
+    return res.outcome || {};
+  } catch (_) { return null; }
+}
+
 export async function saveSettings(patch) {
   // Reflect immediately so the toggle never feels laggy, then confirm.
   if (S.wire && S.wire.settings) Object.assign(S.wire.settings, patch);

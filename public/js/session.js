@@ -179,6 +179,10 @@ export function renderSession() {
   $('btnLogSet').textContent = done ? 'Next machine' : 'Log set';
   $('btnBusy').hidden = done;
   $('btnSkipEx').hidden = done;
+  // A skipped machine used to be a dead end you could jump to and not get out
+  // of. The undo sits exactly where the skip button was, which is where the
+  // thumb that just mis-tapped is already heading.
+  $('btnUnskip').hidden = !e.skipped;
 
   const r = s.reps ?? e.target;
   $('repVal').textContent = r;
@@ -258,6 +262,19 @@ function busyExercise() {
   // back with the same queue.
   saveWorkout(snapshot(false));
   toast(`${exName(e.id)} moved to the end — come back to it`);
+}
+
+// Hit Skip by mistake. Hand the machine back with nothing logged — you're
+// standing at it, so you're about to do set 1.
+function unskipExercise() {
+  const e = cur();
+  if (!e.skipped) return;
+  e.skipped = false;
+  e.sets = [null, null, null];
+  S.session.reps = e.target;
+  persist();
+  saveWorkout(snapshot(false));
+  renderSession();
 }
 
 function skipExercise() {
@@ -350,6 +367,7 @@ export function initSession(finishCb, quitCb) {
   $('btnLogSet').addEventListener('click', logSet);
   $('btnBusy').addEventListener('click', busyExercise);
   $('btnSkipEx').addEventListener('click', skipExercise);
+  $('btnUnskip').addEventListener('click', unskipExercise);
   $('rUp').addEventListener('click', () => setReps((S.session?.reps ?? 8) + 1));
   $('rDown').addEventListener('click', () => setReps((S.session?.reps ?? 8) - 1));
 

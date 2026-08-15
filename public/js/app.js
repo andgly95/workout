@@ -5,7 +5,7 @@ import { initSync, fetchState, flushQueue } from './sync.js';
 import { initHome, renderHome } from './home.js';
 import { initSession, startSession, restoreSession, endSessionUI, renderSession } from './session.js';
 import { renderSummary } from './summary.js';
-import { renderHistory } from './history.js';
+import { initHistory, renderHistory } from './history.js';
 
 function goHome() {
   endSessionUI();
@@ -39,6 +39,9 @@ async function boot() {
 
   initHome(startSession, goHistory);
   initSession(onFinish, goHome);
+  // Correcting a skip changes the next prescription, so Today has to be redrawn
+  // even though you're standing on the history screen when you do it.
+  initHistory(renderHome);
   $('btnDoneClose').addEventListener('click', goHome);
   $('btnBackHome').addEventListener('click', goHome);
 

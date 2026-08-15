@@ -6,8 +6,11 @@
 // have a truth table, the same reason the client doesn't re-derive progression.
 // This file only draws it.
 import { S } from './state.js';
-import { $, esc, dayLabel, mmss } from './util.js';
+import { $, esc, dayLabel, mmss, toast } from './util.js';
 import { exName } from './home.js';
+import { unskipEntry } from './sync.js';
+
+let onChange = () => {};
 
 const DOW = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
@@ -114,7 +117,11 @@ export function renderHistory() {
     const dur = w.finishedAt && w.startedAt ? mmss((w.finishedAt - w.startedAt) / 1000) : null;
     const lines = (w.entries || []).map(en => {
       if (en.skipped) {
-        return `<div class="h-line"><em>${esc(exName(en.id))}</em><i style="opacity:.5">skipped</i></div>`;
+        // The only line here you can have got wrong with one mis-tap, so it's
+        // the only one that's tappable.
+        return `<button class="h-line skipped" data-fix="${esc(w.id)}" data-ex="${esc(en.id)}">
+          <em>${esc(exName(en.id))}</em><i>skipped · tap to fix</i>
+        </button>`;
       }
       const sets = en.sets.map(s => (s === null ? '–' : s)).join(' · ');
       return `<div class="h-line">
@@ -127,6 +134,85 @@ export function renderHistory() {
       ${lines}
     </div>`;
   }).join('');
+
+  list.querySelectorAll('[data-fix]').forEach((el) => {
+    el.addEventListener('click', () => openFix(el.dataset.fix, el.dataset.ex));
+  });
+}
+
+/* ── undoing a skip, after the fact ────────────────────────────────────────
+   A skip means "no signal": applyProgression steps over it entirely, so one
+   mis-tap silently costs you that machine's advance for the week. The fix has
+   to put the sets back on the record AND catch the prescription up, which is
+   why it goes through a route rather than being a local edit. */
+
+let fixing = null;   // { wId, exId, sets: [n|null, n|null, n|null] }
+
+function openFix(wId, exId) {
+  const w = (S.wire?.workouts || []).find(x => x.id === wId);
+  const en = w && (w.entries || []).find(x => x.id === exId);
+  if (!en) return;
+  // Default to what was prescribed. Nine times out of ten that's what you did,
+  // and the whole repair is then one tap.
+  fixing = { wId, exId, sets: [en.target, en.target, en.target] };
+  $('fixTitle').textContent = exName(exId);
+  $('fixSub').textContent = `${dayLabel(w.date)} · ${en.weight} lb, target ${en.target}`;
+  paintFix();
+  $('fixPane').hidden = false;
+}
+
+function closeFix() { fixing = null; $('fixPane').hidden = true; }
+
+function paintFix() {
+  if (!fixing) return;
+  $('fixSets').innerHTML = fixing.sets.map((v, i) => `
+    <div class="fix-row">
+      <span>Set ${i + 1}</span>
+      <button class="rbtn sm" data-set="${i}" data-d="-1" aria-label="Fewer reps">−</button>
+      <b class="${v === null ? 'none' : ''}">${v === null ? '–' : v}</b>
+      <button class="rbtn sm" data-set="${i}" data-d="1" aria-label="More reps">+</button>
+    </div>`).join('');
+  $('fixSets').querySelectorAll('[data-d]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const i = Number(b.dataset.set);
+      // 0 is a set you failed; below that is a set you never did, which is what
+      // a dash means — the same distinction nextState() already draws between a
+      // logged 0 and a blank.
+      const next = (fixing.sets[i] === null ? -1 : fixing.sets[i]) + Number(b.dataset.d);
+      fixing.sets[i] = next < 0 ? null : Math.min(12, next);
+      paintFix();
+    });
+  });
+  $('fixSave').disabled = fixing.sets.every(v => v === null);
+}
+
+async function saveFix() {
+  if (!fixing) return;
+  const btn = $('fixSave');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const res = await unskipEntry(fixing.wId, fixing.exId, fixing.sets);
+  btn.textContent = 'Put it back on the record';
+  if (!res) {
+    btn.disabled = false;
+    return toast('Could not save — needs a connection');
+  }
+  const name = exName(fixing.exId);
+  closeFix();
+  renderHistory();
+  onChange();
+  // Say whether the prescription moved, because usually that is the point — and
+  // when it didn't, say why rather than looking like nothing happened.
+  toast(res.appliedToPlan === false
+    ? `${name} corrected — a later workout already set the weight`
+    : res.note || `${name} put back`, 4200);
+}
+
+export function initHistory(changeHandler) {
+  onChange = changeHandler || (() => {});
+  $('fixCancel').addEventListener('click', closeFix);
+  $('fixSave').addEventListener('click', saveFix);
+  $('fixPane').addEventListener('click', (e) => { if (e.target === $('fixPane')) closeFix(); });
 }
 
 // Tapping a square scrolls its workout into view and flashes it — the square is

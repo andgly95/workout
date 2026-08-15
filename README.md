@@ -33,6 +33,9 @@ client renders what the server returned rather than reimplementing them.
 - **A machine can be occupied.** "Machine busy" sends that one to the back of the
   queue keeping whatever sets you already logged, and the dots along the top jump
   you to any machine at any point — so you come back and resume on the right set.
+- **Skips are undoable.** Hitting Skip by accident quietly costs that machine its
+  progression, so a skipped lift can be put back — from the session, or from
+  History days later, with the next prescription catching up.
 - Screen wake-lock during a session.
 - Installable PWA.
 

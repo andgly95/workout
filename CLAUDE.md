@@ -130,6 +130,37 @@ top are buttons**, so you can jump to any machine at any point. All of it lives 
   order-independent; `plannedEntries()` always rebuilds in program order, because
   the deferral was a fact about that afternoon, not a new plan.
 
+## Undoing a skip
+
+A skip means **"no signal"** — `applyProgression` steps over it entirely — so one
+mis-tap costs that machine its advance for the week and nothing says so. Two ways
+back, because you notice at two different times:
+
+- **In session**, a skipped machine is reachable by its dot and now offers
+  **"Undo skip"** where the Skip button was — the thumb that just mis-tapped is
+  already there. It hands the machine back on set 1.
+- **After the fact**, a skipped line in History is the one tappable line in the
+  list, opening a sheet of three set steppers **defaulted to the target that was
+  prescribed** — so the usual repair is a single tap.
+
+`POST /api/workout/:id/unskip` is the only route that edits a *finished* workout,
+and the rules that keep it honest are all on the server:
+
+- **It has to move the prescription, or it's cosmetic.** `reapplyEntry()` reruns
+  `nextState()` on the corrected entry and rewrites `w.outcomes` in entry order.
+- **`supersededBy()` is the guard.** If a LATER finished workout already logged
+  that exercise, *that* is what set the current weight — correcting an older
+  record must not wind the prescription back to what it would have been at the
+  time. The reply carries `appliedToPlan` so the UI can say which happened
+  instead of looking like nothing did.
+- **Refuses what would corrupt a record:** an unknown workout or exercise (404),
+  an entry that isn't skipped (400 — a second call would advance the weight
+  twice), and all-blank sets (400 — that's a skip by another name). A refused
+  call leaves the entry exactly as it was.
+- **Not offline-queued.** The queue's contract is "latest full snapshot per
+  workout id"; a correction that merges with server state doesn't fit it, and
+  this is a repair you make at a desk, not mid-set in a basement.
+
 ## The rest alert — read this before touching the timer
 
 **The rest timer is not what makes the sound.** On iOS a PWA that isn't in front
@@ -214,6 +245,7 @@ state = {
 | `POST /api/workout` | upsert a workout (full snapshot); `done:true` applies progression once |
 | `POST /api/adjust` | manual weight/target override (machine minimums, accepting a deload) |
 | `POST /api/settings` | `includeOptional`, `restSec` |
+| `POST /api/workout/:id/unskip` | undo an accidental skip and catch the weight up |
 | `DELETE /api/workout/:id` | remove a logged workout |
 
 ## Key conventions
