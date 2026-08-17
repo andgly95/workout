@@ -11,6 +11,30 @@ Node + Express, vanilla ES modules, a JSON file for storage, **no build step**.
 
 Three sets, ninety seconds' rest, 8–12 reps, on the same machines every time.
 
+## Build your own workouts
+
+The program is data, not code. A **plan** is a named workout — an ordered list of
+machines plus its own overload rules and schedule — and you can have several and
+switch between them. Workout A and Workout B keep **separate weights for the same
+machine**, because the rep target is part of the progression state and a 3×5 plan
+would otherwise drag a 3×12 plan's weight around.
+
+The editor uses progressive disclosure: the machines are open, and *Progressive
+overload* and *Schedule* collapse to one line of plain English saying what they
+currently do. With a single plan the home screen looks exactly as it did before
+plans existed — a list of one is not a choice worth showing.
+
+## Scheduling
+
+Either specific weekdays, or **every N days counted from the last session you
+actually finished** — do it Monday with "every other day" set and the next is
+Wednesday. Miss one and it stays *due* rather than quietly sliding to tomorrow.
+
+Reminders arrive as a real notification with the app closed, pushed from the
+server. That's the opposite call from the rest timer below, for the opposite
+reason: a rest alert must fire ninety seconds from now with no signal, and a daily
+nudge must arrive when nothing on the device is awake to raise it.
+
 | Result | Next workout |
 |---|---|
 | all three sets at **12** | weight **up one step**, target back to **8** |
@@ -18,9 +42,11 @@ Three sets, ninety seconds' rest, 8–12 reps, on the same machines every time.
 | any set below **8** | **offers** a one-step drop — never automatic |
 | otherwise | repeat the same weight and target |
 
-So a lift climbs 8 → 10 → 12 → heavier → 8. The step is **per machine**, because
-the stacks differ: leg press 20, chest press / low row / vertical traction / leg
-curl 10, overhead press 5. The rules live in exactly one place,
+So a lift climbs 8 → 10 → 12 → heavier → 8 by default, and every number in that
+sentence is adjustable per plan — a 5×5 plan advances by weight, since it has no
+rep rungs to climb. The weight step is **per machine**, because the stacks differ:
+leg press 20, chest press / low row / vertical traction / leg curl 10, overhead
+press 5. The rules live in exactly one place,
 `lib/progression.js`, as pure functions with a test for every row above. The
 client renders what the server returned rather than reimplementing them.
 

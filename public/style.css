@@ -15,6 +15,9 @@ body{
   -webkit-font-smoothing:antialiased;
 }
 button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+/* Inputs do NOT inherit colour from the page — without this they render the UA's
+   near-black text on a dark card, which reads as an empty field. */
+input,textarea,select{font:inherit;color:var(--txt)}
 h1{font-size:22px;margin:0;letter-spacing:-.02em}
 h2{font-size:20px;margin:0;letter-spacing:-.01em}
 small{font-size:12px}
@@ -272,6 +275,114 @@ small{font-size:12px}
 .chart .cv b{color:var(--txt)}
 .empty-note{text-align:center;color:var(--dim);padding:40px 20px;font-size:14px}
 
+/* ─── the plan: picker, header, editor ─────────────────────────────────────
+   The picker is a segmented row that only renders with two or more plans, so a
+   single-plan home screen is byte-for-byte what it was before plans existed. */
+.seg{display:flex;gap:6px}
+.seg button{
+  flex:1;padding:9px 10px;border-radius:11px;background:var(--card);
+  border:1px solid var(--line);color:var(--dim);font-size:13.5px;font-weight:600;
+  display:flex;align-items:center;justify-content:center;gap:6px;
+}
+.seg button.on{background:var(--txt);color:var(--bg);border-color:var(--txt)}
+.plan-row{margin-bottom:14px}
+.plan-row[hidden]{display:none}
+/* A plan that's due says so on its own chip — the reason to look at the picker. */
+.seg button .due{width:6px;height:6px;border-radius:99px;background:var(--accent);flex:none}
+.seg button.on .due{background:var(--bg)}
+
+.plan-hd{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:2px 0 10px}
+.plan-hd b{display:block;font-size:15px;font-weight:700}
+.plan-hd small{display:block;color:var(--dim);font-size:12px;margin-top:2px}
+.link-btn{
+  color:var(--accent);font-size:13px;font-weight:600;flex:none;
+  border-bottom:1px solid currentColor;padding-bottom:1px;
+}
+.link-btn:active{opacity:.6}
+/* "Due today" is the one thing on the home screen worth colouring. */
+.sub.due{color:var(--accent);font-weight:600}
+
+#planScroll{padding:0 16px}
+.sec-hd{
+  font-size:11.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);
+  margin:20px 0 8px;
+}
+.pm-row{
+  display:flex;align-items:center;gap:8px;
+  background:var(--card);border:1px solid var(--line);border-radius:13px;
+  padding:8px 10px;margin-bottom:8px;
+}
+.pm-move{display:flex;flex-direction:column;gap:2px;flex:none}
+.pm-move button{
+  width:28px;height:22px;color:var(--dim);font-size:13px;border-radius:6px;
+  background:var(--card2);
+}
+.pm-move button:disabled{opacity:.25}
+.pm-bd{flex:1;min-width:0;text-align:left}
+.pm-bd b{display:block;font-size:15px;font-weight:650}
+.pm-bd small{display:block;color:var(--dim);font-size:11.5px;margin-top:2px}
+.pm-x{flex:none;width:32px;color:var(--dim);font-size:20px}
+.add-row{display:flex;gap:8px;margin-top:4px}
+.add-row .ghost{margin-top:0;background:var(--card);border:1px solid var(--line);border-radius:12px}
+
+/* Progressive disclosure: the summary line is the whole point — you can read what
+   a plan does without opening anything, and the knobs are one tap away. */
+.disc{
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  margin-top:12px;overflow:hidden;
+}
+.disc-hd{
+  width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:13px 14px;text-align:left;
+}
+.disc-hd b{display:block;font-size:14.5px;font-weight:650}
+.disc-hd small{display:block;color:var(--dim);font-size:12px;margin-top:3px;line-height:1.4}
+.disc-hd .chev{color:var(--dim);font-style:normal;font-size:15px;flex:none}
+.disc.open .disc-hd{border-bottom:1px solid var(--line)}
+.disc-bd{padding:14px;display:flex;flex-direction:column;gap:10px}
+.disc-bd .fix-row{background:var(--card2)}
+.disc-bd .fix-row>span{display:flex;flex-direction:column;gap:2px}
+.disc-bd .fix-row>span em{font-style:normal;text-transform:none;letter-spacing:0;font-size:11px;opacity:.75}
+.disc-note{color:var(--dim);font-size:12.5px;line-height:1.5;margin:2px 0 0}
+.disc-note.warn{color:var(--warn)}
+
+.dows{display:flex;gap:5px}
+.dows button{
+  flex:1;aspect-ratio:1;border-radius:10px;background:var(--card2);
+  border:1px solid var(--line);color:var(--dim);font-size:13px;font-weight:600;
+}
+.dows button.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}
+
+.pick-list{display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto;margin-bottom:16px}
+.pick-row{
+  display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+  background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;
+  text-align:left;
+}
+.pick-row b{font-size:15px;font-weight:650}
+.pick-row small{color:var(--dim);font-size:12px;flex:none}
+
+/* form fields, shared by the plan name and the machine sheet */
+.fld{display:block;margin-bottom:14px}
+.fld>span{
+  display:block;font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+  color:var(--dim);margin-bottom:6px;
+}
+.fld>span em{font-style:normal;text-transform:none;letter-spacing:0;opacity:.7}
+.fld input{
+  width:100%;background:var(--card);border:1px solid var(--line);border-radius:11px;
+  padding:11px 12px;outline:none;font-size:16px;
+}
+.fld input:focus{border-color:var(--accent)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.two>*{min-width:0}
+#planScroll .fld{margin-top:18px}
+.danger{
+  width:100%;margin-top:16px;padding:13px;color:var(--warn);font-size:13.5px;
+  border-radius:12px;border:1px solid var(--line);
+}
+.danger[hidden]{display:none}
+
 /* ─── fixing a skip after the fact ─────────────────────────────────────── */
 .modal{
   position:fixed;inset:0;background:rgba(14,17,22,.92);backdrop-filter:blur(8px);
@@ -279,7 +390,7 @@ small{font-size:12px}
 }
 /* an author `display` beats the UA rule for [hidden] — restore it explicitly */
 .modal[hidden]{display:none}
-.modal-in{width:min(360px,100%)}
+.modal-in{width:min(360px,100%);max-height:88dvh;overflow-y:auto}
 .modal-hd{text-align:center;margin-bottom:22px}
 .modal-hd b{display:block;font-size:23px;font-weight:750;letter-spacing:-.03em}
 .modal-hd span{display:block;color:var(--dim);font-size:13.5px;margin-top:4px}

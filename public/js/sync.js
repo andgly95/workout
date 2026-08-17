@@ -26,9 +26,9 @@ function dequeue(id) {
   saveLocal(LS.queue, queue().filter(p => p.id !== id));
 }
 
-async function post(path, body) {
+async function post(path, body, method = 'POST') {
   const r = await fetch(path, {
-    method: 'POST',
+    method,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -89,6 +89,72 @@ export async function unskipEntry(workoutId, id, sets) {
     applyWire(res.state);
     return res.outcome || {};
   } catch (_) { return null; }
+}
+
+/* ── the program itself ────────────────────────────────────────────────────
+   Plans and machines are edited at a desk, not mid-set, so unlike a workout
+   snapshot none of this is queued offline — it fails and says so. `applyWire` on
+   every reply keeps one copy of the truth. */
+
+export async function patchPlan(id, patch) {
+  try { applyWire((await post(`/api/plan/${id}`, patch, 'PATCH')).state); return true; }
+  catch (_) { return false; }
+}
+
+export async function createPlan(body) {
+  try {
+    const res = await post('/api/plan', body || {});
+    applyWire(res.state);
+    return res.plan;
+  } catch (_) { return null; }
+}
+
+export async function deletePlan(id) {
+  try { applyWire(await post(`/api/plan/${id}`, {}, 'DELETE')); return true; }
+  catch (_) { return false; }
+}
+
+export async function setActivePlan(id) {
+  try { applyWire(await post('/api/plan/active', { id })); return true; }
+  catch (_) { return false; }
+}
+
+export async function createExercise(body) {
+  try { applyWire((await post('/api/exercise', body)).state); return true; }
+  catch (_) { return false; }
+}
+
+export async function saveExercise(id, patch) {
+  try { applyWire((await post(`/api/exercise/${id}`, patch, 'PATCH')).state); return true; }
+  catch (_) { return false; }
+}
+
+export async function removeExercise(id) {
+  try { applyWire(await post(`/api/exercise/${id}`, {}, 'DELETE')); return true; }
+  catch (_) { return false; }
+}
+
+// Hand this device's push subscription to the server so a reminder can reach it
+// with the app closed. Silent on failure by design: it runs off the back of the
+// alerts switch, whose job is the rest tone, and that must not appear to fail
+// because a push service was unreachable.
+export async function subscribePush() {
+  try {
+    const key = S.wire?.push?.key;
+    if (!key || !('serviceWorker' in navigator) || !('PushManager' in window)) return false;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription()
+      || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64(key) });
+    applyWire(await post('/api/push/subscribe', { subscription: sub.toJSON() }));
+    return true;
+  } catch (_) { return false; }
+}
+
+// A VAPID key arrives base64url; PushManager wants raw bytes.
+function b64(s) {
+  const pad = '='.repeat((4 - (s.length % 4)) % 4);
+  const raw = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
 }
 
 export async function saveSettings(patch) {

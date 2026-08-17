@@ -3,17 +3,22 @@
 // current prescription per exercise and the log of workouts.
 const fs = require('fs');
 const path = require('path');
-const { startingState } = require('./lib/progression');
-
 const FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'store.json');
 
 function defaultState() {
   return {
-    // exerciseId -> { weight, target } : what to lift NEXT time
-    progress: startingState(),
-    // [{ id, date, startedAt, finishedAt, done, entries:[{ id, weight, target, sets:[], skipped }] }]
+    // The catalogue, and the named plans that pick from it. Both user-editable —
+    // lib/plan.js seeds them from the original hardcoded program on first load.
+    exercises: [],
+    plans: [],
+    activePlanId: null,
+    // planId -> exerciseId -> { weight, target } : what to lift NEXT time.
+    // Nested per plan on purpose — see lib/plan.js.
+    progress: {},
+    // [{ id, planId, date, startedAt, finishedAt, done, entries:[...] }]
     workouts: [],
-    settings: { restSec: 90, includeOptional: false },
+    push: { subs: [], sent: {} },
+    settings: {},
     seq: 1,
   };
 }
@@ -21,13 +26,10 @@ function defaultState() {
 let state;
 try {
   state = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-  if (!state.progress) state.progress = startingState();
+  if (!state.progress) state.progress = {};
   if (!state.workouts) state.workouts = [];
-  if (!state.settings) state.settings = { restSec: 90, includeOptional: false };
+  if (!state.settings) state.settings = {};
   if (!state.seq) state.seq = 1;
-  // Backfill any exercise added to the program after this store was created.
-  const seed = startingState();
-  for (const id of Object.keys(seed)) if (!state.progress[id]) state.progress[id] = seed[id];
 } catch (e) {
   if (e.code !== 'ENOENT') {
     const backup = FILE + '.corrupt-' + Date.now();
@@ -70,6 +72,11 @@ process.on('SIGINT', () => { flushSync(); process.exit(0); });
 function nextId(prefix) {
   return `${prefix}${state.seq++}`;
 }
+
+// Seed the catalogue and fold a pre-plans store into the new shape. Runs on LOAD
+// only, which is why plan.js is the thing that owns it — a container created
+// anywhere else would miss stores written since the last restart.
+require('./lib/plan').migrate(state, nextId);
 
 // Make sure data/ exists before the first write.
 try { fs.mkdirSync(path.dirname(FILE), { recursive: true }); } catch (_) {}

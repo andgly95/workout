@@ -1,7 +1,11 @@
 # Lift — CLAUDE.md
 
-Personal progressive-overload workout tracker. Single user (Andrew), no accounts —
-auth is Cloudflare Access in front of the tunnel, so the app itself has no login.
+Progressive-overload workout tracker. **The program is data**: you build your own
+workouts, each with its own overload rules and schedule, and switch between them.
+
+Still single user (Andrew), no accounts — auth is Cloudflare Access in front of the
+tunnel, so the app itself has no login. Multi-user is **not** built; making the
+program customisable was the prerequisite for it, not the same job.
 
 Live at **https://workout.guess-ai.app** (Cloudflare tunnel `hot-seat` → `localhost:3003`).
 Repo: `github.com/andgly95/workout` (private).
@@ -12,17 +16,65 @@ Same shape as `~/the-square`, minus socket.io (single user — plain REST is eno
 
 - **Runtime:** Node.js v22, no build step — `node server.js` is production
 - **Server:** Express, thin `server.js` + CommonJS modules in `lib/`
+- **Deps:** `express`, `web-push` (reminders) — nothing else
 - **Store:** single JSON file (`data/store.json`) via `store.js` — no database
 - **Frontend:** vanilla JS ES modules in `public/js/` + plain HTML/CSS
 - **Deployment:** systemd service `workout` on the Pi, port 3003
-- **Tests:** `npm test` — 44 rules/calendar/API assertions + a headless-chromium check
+- **Tests:** `npm test` — 96 rules/schedule/plan/push/calendar/API assertions + a headless-chromium check
 
 ## The program (the whole point)
 
-3 sets · 90 s rest · 8–12 reps. 1–3 sessions a week, same machines every time.
+**Plans, not a hardcoded program.** `state.exercises` is a catalogue of machines;
+`state.plans` are named workouts that each pick some of them, in order, with their
+own rules and schedule. `lib/plan.js` is the gate everything passes through — add
+a field THERE FIRST or a PATCH will appear to work and change nothing.
+
+```js
+plan = { id, name, exerciseIds: [...],       // ordered
+         rules:    { sets, minReps, maxReps, repStep, restSec },
+         schedule: { mode, days, everyN, at, anchor },
+         archived }
+```
+
+The default ladder is the original program — 3 sets · 90 s rest · 8–12 reps —
+seeded as one plan called "My workout" holding all six original machines.
 
 Starting weights: leg press 140, chest press 80, low row 80, vertical traction
-(lat pulldown) 60, overhead press 25, leg curl 60 (optional, off by default).
+(lat pulldown) 60, overhead press 25, leg curl 60.
+
+### Weights are per PLAN, not per machine
+
+`state.progress[planId][exerciseId]`. The same machine in Workout A and Workout B
+keeps two weights, because **the rep target is part of the progression state** — a
+plan built on 3×5 and one built on 3×12 would drag each other's weight around if
+they shared. Plans whose exercises don't overlap pay nothing for the nesting.
+
+- **Copying a plan copies its weights.** The machines are the same machines;
+  starting a copy at the catalogue's seed weight would hand you a number from
+  whenever the app was first set up. They diverge from there.
+- `supersededBy()` in `routes.js` only counts later workouts **of the same plan** —
+  B logging the leg press says nothing about A's leg press.
+- The heatmap, the sparklines and the streak count are all filtered to the active
+  plan. Mixing an upper day into a lower day's history makes both unreadable.
+
+### `optional` is gone
+
+A machine is in a plan or it isn't, and taking one out is a tap. `includeOptional`
+was the only way to switch a lift off; the migration honours whatever it was set to
+and then the flag stops existing.
+
+### Progressive disclosure
+
+The rule for the whole editor, because the three things it changes are wanted at
+wildly different rates. **Machines are open** (routine). **Progressive overload and
+Schedule are collapsed** to one line of plain English stating what they currently
+do (changed once, if ever). You can read a whole plan without opening anything.
+
+- The picker on Home **only renders with two or more plans** — with one, the home
+  screen is what it was before plans existed. A list of one is not a choice.
+- The overload summary comes from **`progression.describeRules()` on the server**,
+  not from the client. A label the client worded itself would drift from what
+  `nextState` actually does the first time the rules gained a knob.
 
 Progression ladder, per exercise — `lib/progression.js` is the ONLY place these
 rules live (the client never re-implements them; the summary screen renders what
@@ -37,6 +89,25 @@ the server returned, and shows a pending state when offline):
 
 So a lift climbs 8 → 10 → 12 → heavier → 8. `nextState()` is pure; every row
 above has a test in `test/test.js`.
+
+**Every one of those numbers is now a per-plan knob.** `nextState(cur, reps, opts)`
+takes `{ sets, minReps, maxReps, repStep, step }` and defaults to the original
+program, which is why the whole pre-existing truth table still exercises it. Making
+them arguments rather than having the file look a plan up is what keeps it pure.
+
+`lib/plan.js cleanRules()` is where the guards live, and they matter because a
+misconfigured plan looks like a broken app:
+
+- `maxReps` can never sit below `minReps` — it is clamped up to meet it.
+- `repStep` can never be 0 (the target would sit at `minReps` forever) and never
+  exceed the range it steps through.
+- **A plan with no rep rungs advances by weight.** 5×5 every time means `minReps ===
+  maxReps`, so clearing the target has nowhere to send it and `nextState` returns
+  `weight-up` instead of a rep bump. Without that, a 5×5 plan could never progress.
+- **`Number(v) || default` is wrong for every number here** and was a real bug: a
+  submitted `0` is present-but-illegal, not absent, so `sets: 0` came back as 3
+  instead of clamping to 1. `num()`/`clamp()` treat only `undefined`/`null`/`''` as
+  missing. The same trap is commented in `lib/schedule.js`.
 
 ### The step is per machine
 
@@ -76,7 +147,11 @@ server.js              — express setup + listen (~12 lines)
 store.js               — JSON read/write, debounced atomic save, SIGTERM flush
 deploy.sh              — npm test → restart → verify active → push to GitHub
 lib/
-  progression.js       — EXERCISES, startingState(), nextState() — THE rules
+  progression.js       — nextState(cur, reps, opts) + describeRules(). THE rules. PURE.
+  plan.js              — THE gate: catalogue, plans, rules guards, migration
+  schedule.js          — due / next / overdue. PURE, no clock. Truth-tabled.
+  push.js              — VAPID, subscriptions, the once-a-minute reminder sender
+  config.js            — config.local.json (gitignored, 0600); CONFIG_FILE override
   calendar.js          — the 12-week heatmap grid. PURE. Monday-anchored, DST-safe.
   routes.js            — all HTTP; cache-bust stamp; plannedEntries(); applyProgression()
 public/
@@ -90,7 +165,8 @@ public/
     util.js            — $, esc, mmss, dayLabel, toast, showScreen, buzz
     alarm.js           — THE rest alert: audio-thread scheduling + notifications
     sync.js            — local-first save + offline retry queue
-    home.js            — Today screen (prescription + stats + the alerts switch)
+    home.js            — Today screen (prescription + stats + plan picker + alerts)
+    plan.js            — the plan editor. Progressive disclosure lives here.
     session.js         — live workout: sets, weight stepper, rest timer, wake lock
     summary.js         — post-workout outcomes + deload button
     history.js         — 12-week calendar, weight sparklines, past workouts
@@ -161,6 +237,70 @@ and the rules that keep it honest are all on the server:
   workout id"; a correction that merges with server state doesn't fit it, and
   this is a repair you make at a desk, not mid-set in a basement.
 
+## Scheduling and reminders
+
+`lib/schedule.js` is **pure and takes `today` as an argument** rather than reading a
+clock — that is the only reason any of it is testable, and it has the truth table to
+show for it. Two modes, because people describe training two ways:
+
+| mode | means |
+|---|---|
+| `weekdays` | "Mondays, Wednesdays and Fridays" — a fixed grid |
+| `interval` | "every other day", "every 3 days" — **rolling off the last one you finished** |
+
+- **`interval` rolls off the last COMPLETED session, not a fixed anchor.** That is
+  what "every other day" means to the person saying it: do it Monday, next is
+  Wednesday. A fixed grid would keep marking days due while you were away and then
+  expect you back on its own rhythm. The `anchor` only stands in before there is any
+  history to roll from.
+- **Missing a day leaves it DUE, not rescheduled**, and `overdueDays` says by how
+  much. Quietly sliding it to tomorrow is how a schedule stops meaning anything.
+- **Days are walked with `addDays`** (shared with `calendar.js`), never by adding
+  86400000 — same DST trap, same pinned test.
+- An unscheduled plan is not overdue, it is just a plan. `mode: 'off'` returns
+  `due: false, next: null`, and Home says nothing at all.
+- `weekdays` with an empty `days` array is inert. `HORIZON` bounds the search so it
+  can't spin.
+
+### Web Push, and why it's right here when it was wrong for the rest timer
+
+The rest-alert section below says Web Push is the wrong answer, and it is — **for
+that alert**. A daily reminder is the opposite problem, and the two reasons don't
+generalise:
+
+| | rest tone | due reminder |
+|---|---|---|
+| fires | 90 s from now | hours from now |
+| network | must work with none | phone will have had some |
+| app state | in front, frozen, or locked | closed |
+| mechanism | audio thread (`alarm.js`) | Web Push (`lib/push.js`) |
+
+- **VAPID keys are minted lazily** into `config.local.json` (gitignored, 0600). The
+  path is overridable with `CONFIG_FILE`, which is how `npm test` never writes a
+  config into the working tree.
+- **`send()` mints its own keypair.** It used to be gated on `configured()`, which
+  is false before the first mint — so the very first reminder returned 0 and sent
+  nothing, with no error. Reachable in production only when a device subscribed
+  before anything read the public key, i.e. exactly the case nobody would notice
+  until a notification didn't arrive.
+- **A failed send is not marked sent** — marking regardless would burn today's one
+  nudge on a momentary outage. But attempts are **counted and capped** at
+  `MAX_TRIES`, because a failure that isn't 404/410 (a rejected subject, a bad day
+  at the push service) would otherwise retry and log every single minute forever.
+- **404/410 prunes the subscription**; anything else keeps it and retries.
+- One notification per plan per day (`push.sent[planId]`), and an archived plan is
+  never nagged about.
+- `addSub` requires https **or loopback**. Loopback only, and only so the whole
+  chain can be pointed at a stand-in and verified — the failure mode of getting
+  push wrong is silence, not an error.
+- The service worker has its own `push` handler with **`tag: 'lift-due'`**, so a
+  reminder never replaces a live rest alert or vice versa.
+- **One permission, two uses.** The existing rest-alerts switch grants notification
+  permission and the subscription is registered off the back of it, rather than
+  behind a second switch that asks for the same thing.
+- `POST /api/push/test` exists because there is no other way to find out the chain
+  works without waiting for six o'clock.
+
 ## The rest alert — read this before touching the timer
 
 **The rest timer is not what makes the sound.** On iOS a PWA that isn't in front
@@ -222,19 +362,37 @@ shaded, because a half-drawn final column reads as a missing week.
 
 ```js
 state = {
-  progress: { exerciseId: { weight, target } },   // what to lift NEXT time
+  // The catalogue of machines, and the named workouts that pick from it.
+  exercises: [{ id, name, short, step, weight }],
+  plans: [{ id, name, exerciseIds, rules, schedule, archived }],
+  activePlanId,
+  // planId -> exerciseId -> { weight, target } : what to lift NEXT time.
+  // Nested per plan on purpose — the rep target is part of the state.
+  progress: { planId: { exerciseId: { weight, target } } },
   workouts: [{
     id,            // client-minted ('w' + base36) so offline retries upsert, not duplicate
+    planId,        // pinned when the session STARTS, not read at save time
     date,          // 'YYYY-MM-DD' local
     startedAt, finishedAt, done,
     applied,       // true once progression has been rolled in — makes replay idempotent
     outcomes,      // [{ id, action, weight, target, note, suggestWeight?, canDrop? }]
-    entries: [{ id, weight, target, sets: [r,r,r], skipped }],
+    entries: [{ id, weight, target, sets: [r,…], skipped }],   // as many as the plan's rules
   }],
-  settings: { restSec, includeOptional },
+  push: { subs: [{ endpoint, keys, at }], sent: { planId: 'YYYY-MM-DD' },
+          tried: { planId: { day, n } } },
+  settings: {},   // restSec moved into plan.rules; nothing global is left
   seq: 1,
 }
 ```
+
+**Wire-only** (computed in `wire()`, never stored): `plans[].rulesLabel`,
+`plans[].status` (from `schedule.statusOf`), `plans[].lastDone`, `heatmap`,
+`push.key`, `push.subscribed`. `rules` on the wire is the **active plan's** ladder,
+under the name the session screen always used — which is why almost nothing
+downstream had to learn about plans at all.
+
+`plannedEntries()` always rebuilds in the plan's order, so a "Machine busy"
+reordering is a fact about that afternoon and is never written back to the plan.
 
 ## HTTP routes
 
@@ -244,7 +402,11 @@ state = {
 | `GET /api/state` | exercises, rules, progress, settings, planned entries, workouts, `heatmap` |
 | `POST /api/workout` | upsert a workout (full snapshot); `done:true` applies progression once |
 | `POST /api/adjust` | manual weight/target override (machine minimums, accepting a deload) |
-| `POST /api/settings` | `includeOptional`, `restSec` |
+| `POST /api/exercise` · `PATCH`/`DELETE /api/exercise/:id` | the machine catalogue |
+| `POST /api/plan` · `PATCH`/`DELETE /api/plan/:id` | plans; `copyOf` clones one |
+| `POST /api/plan/active` | which workout you're doing |
+| `POST /api/push/subscribe` · `/unsubscribe` · `/test` | reminders |
+| `POST /api/settings` | `restSec` (forwarded into the active plan's rules) |
 | `POST /api/workout/:id/unskip` | undo an accidental skip and catch the weight up |
 | `DELETE /api/workout/:id` | remove a logged workout |
 
@@ -255,6 +417,20 @@ state = {
   be a shared pure module the way `progression.js` is. `client-check.js` covers it
   by driving the real UI: defer a machine, assert it moved and reads part-done,
   tap its dot, assert it resumes on set 2.
+- **`lib/progression.js`, `lib/calendar.js` and `lib/schedule.js` are pure and are
+  the source of truth.** `schedule.js` takes `today` as an argument and `nextState`
+  takes its rules as an argument — neither reaches for the active plan or a clock,
+  which is what keeps both testable and is why the guards live in `lib/plan.js`.
+- **`lib/plan.js` is the gate.** Everything entering the store as program data goes
+  through `cleanExercise` / `cleanRules` / `cleanPlan`. A field it doesn't know is
+  dropped, so **add it there first**.
+- **The plan is resolved once, at the top of whatever is asking, and passed down.**
+  Nothing below reaches for the active plan on its own, so a workout logged against
+  A can never be scored with B's ladder.
+- **Cache-busting is anchored on the attribute.** `.replace('/js/', …)` took the
+  first occurrence anywhere in the file, and an HTML comment mentioning a path under
+  `public/js/` was enough to eat the stamp and ship unstamped JS. It's
+  `src="/js/` → `src="/js-STAMP/`, global, now.
 - **`lib/progression.js` and `lib/calendar.js` are pure and are the source of
   truth.** Don't mirror `nextState()` or the day bucketing into client code — the
   summary screen renders server outcomes and shows "will update when you're back

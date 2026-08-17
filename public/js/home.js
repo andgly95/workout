@@ -1,8 +1,10 @@
 // Today screen — the prescription for the next workout.
 import { S } from './state.js';
 import { $, esc, dayLabel, todayStr, parseDay, toast } from './util.js';
-import { saveSettings } from './sync.js';
+import { setActivePlan, subscribePush } from './sync.js';
 import { alertsSupported, alertsOn, enableAlerts, muteAlerts } from './alarm.js';
+
+let onEditPlan = () => {};
 
 export function exName(id) {
   const e = (S.wire?.exercises || []).find(x => x.id === id);
@@ -18,9 +20,18 @@ export function exStep(id) {
   const e = (S.wire?.exercises || []).find(x => x.id === id);
   return (e && e.step) || S.wire?.rules?.weightStep || 5;
 }
+// The active plan, and its ladder. `wire.rules` is deliberately the active plan's
+// rules under the name the session screen always used, so nothing downstream had
+// to learn about plans at all.
+export const activePlan = () =>
+  (S.wire?.plans || []).find(p => p.id === S.wire.activePlanId) || (S.wire?.plans || [])[0] || null;
+export const planRules = () => S.wire?.rules || { sets: 3, minReps: 8, maxReps: 12, repStep: 2 };
 
+// This plan's sessions only. Counting an upper day towards a lower day's streak
+// would make both numbers mean nothing.
 function doneWorkouts() {
-  return (S.wire?.workouts || []).filter(w => w.done);
+  const id = S.wire?.activePlanId;
+  return (S.wire?.workouts || []).filter(w => w.done && (!id || w.planId === id));
 }
 
 // Monday-anchored week count — matches how a "1-3x per week" target is read.
@@ -50,13 +61,68 @@ function statsHtml() {
     <div class="stat"><b style="font-size:15px;padding-top:4px">${last ? esc(dayLabel(last.date)) : '—'}</b><span>Last lift</span></div>`;
 }
 
+// What the schedule says about today, in words. Only a plan with a schedule set
+// says anything at all — an unscheduled plan is not overdue, it is just a plan.
+function scheduleLine(p) {
+  const st = p && p.status;
+  if (!st || st.mode === 'off') return null;
+  if (st.due) {
+    return st.overdueDays > 0
+      ? `Due — ${st.overdueDays} day${st.overdueDays === 1 ? '' : 's'} overdue`
+      : 'Due today';
+  }
+  if (st.doneToday) return 'Done today';
+  if (!st.next) return null;
+  const tomorrow = st.next === dayStr(new Date(Date.now() + 86400000));
+  return tomorrow ? 'Next: tomorrow' : `Next: ${dayLabel(st.next)}`;
+}
+
+const dayStr = (d) => {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
+// The picker exists only once there is a choice to make. With one plan the home
+// screen is exactly what it was before plans existed — that's the whole point of
+// disclosing it progressively rather than always showing a list of one.
+function renderPlanRow() {
+  const plans = (S.wire?.plans || []).filter(p => !p.archived);
+  const row = $('planRow');
+  row.hidden = plans.length < 2;
+  if (plans.length < 2) return;
+  row.innerHTML = plans.map(p => {
+    const due = p.status && p.status.due ? '<i class="due"></i>' : '';
+    return `<button data-plan="${esc(p.id)}"
+      class="${p.id === S.wire.activePlanId ? 'on' : ''}">${esc(p.name)}${due}</button>`;
+  }).join('');
+  row.querySelectorAll('[data-plan]').forEach(b => {
+    b.addEventListener('click', async () => {
+      if (b.dataset.plan === S.wire.activePlanId) return;
+      await setActivePlan(b.dataset.plan);
+      renderHome();
+    });
+  });
+}
+
 export function renderHome() {
   if (!S.wire) return;
 
+  const plan = activePlan();
+  renderPlanRow();
+
+  const line = scheduleLine(plan);
   const sub = S.session
     ? 'Workout in progress'
-    : new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+    : [line, new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })]
+      .filter(Boolean).join(' · ');
   $('homeSub').textContent = sub;
+  $('homeSub').classList.toggle('due', !S.session && !!(plan && plan.status && plan.status.due));
+  // The plan's own name and the way into editing it. One plan or six, this is
+  // where you go to change what the workout is.
+  $('planName').textContent = plan ? plan.name : 'No workout';
+  $('planMeta').textContent = plan
+    ? `${plan.exerciseIds.length} machine${plan.exerciseIds.length === 1 ? '' : 's'} · ${plan.rulesLabel}`
+    : '';
   $('streakRow').innerHTML = statsHtml();
 
   const outcomes = lastOutcomeMap();
@@ -80,8 +146,8 @@ export function renderHome() {
     </div>`;
   }).join('') || '<div class="empty-note">No exercises.</div>';
 
-  $('optLegCurl').checked = !!S.wire.settings?.includeOptional;
   $('btnStart').textContent = S.session ? 'Resume workout' : 'Start workout';
+  $('btnStart').disabled = !plan || !plan.exerciseIds.length;
   renderAlertRow();
 }
 
@@ -95,23 +161,28 @@ function renderAlertRow() {
   const denied = Notification.permission === 'denied';
   $('optAlerts').checked = alertsOn();
   $('optAlerts').disabled = denied;
+  const scheduled = (S.wire?.plans || []).some(p => p.schedule && p.schedule.mode !== 'off');
   $('alertSub').textContent = denied
     ? 'blocked — turn notifications on for Lift in Settings'
-    : 'banner when the rest timer runs out';
+    : scheduled
+      ? 'rest timer, and a nudge when a workout is due'
+      : 'banner when the rest timer runs out';
 }
 
-export function initHome(onStart, onHistory) {
+export function initHome(onStart, onHistory, onEdit) {
+  onEditPlan = onEdit || (() => {});
   $('btnStart').addEventListener('click', onStart);
   $('btnHistory').addEventListener('click', onHistory);
-  $('optLegCurl').addEventListener('change', async (e) => {
-    await saveSettings({ includeOptional: e.target.checked });
-    renderHome();
-  });
+  $('btnEditPlan').addEventListener('click', () => onEditPlan(S.wire?.activePlanId));
   // The permission prompt only works from a gesture, which this is.
   $('optAlerts').addEventListener('change', async (e) => {
     if (!e.target.checked) { muteAlerts(true); return renderAlertRow(); }
     const ok = await enableAlerts();
     if (!ok) toast('Allow notifications for Lift to get the banner');
+    // Same permission, two uses: the rest banner while you're in the app, and the
+    // pushed reminder when you're not. Granting once buys both, so this is where
+    // the subscription is registered rather than behind a second switch.
+    else await subscribePush();
     renderAlertRow();
   });
 }

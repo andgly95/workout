@@ -1,6 +1,7 @@
 // Characterization suite. Layer 1 exercises the progression rules directly;
 // layer 2 boots a real server against a throwaway store and drives the API.
 const assert = require('assert');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
@@ -110,7 +111,7 @@ async function rules() {
     const seen = [];
     for (let i = 0; i < 3; i++) {
       seen.push(`${st.weight}x${st.target}`);
-      const r = P.nextState(st, [st.target, st.target, st.target], step);
+      const r = P.nextState(st, [st.target, st.target, st.target], { step });
       st = { weight: r.weight, target: r.target };
     }
     assert.deepStrictEqual(seen, ['140x8', '140x10', '140x12']);
@@ -141,7 +142,7 @@ async function rules() {
 
   await t('clearing 3x12 moves each machine by ITS step, not by five', () => {
     const up = (id, w) =>
-      P.nextState({ weight: w, target: 12 }, [12, 12, 12], P.stepFor(id)).weight;
+      P.nextState({ weight: w, target: 12 }, [12, 12, 12], { step: P.stepFor(id) }).weight;
     assert.strictEqual(up('leg-press', 165), 185);
     assert.strictEqual(up('chest-press', 95), 105);
     assert.strictEqual(up('low-row', 95), 105);
@@ -151,7 +152,7 @@ async function rules() {
   });
 
   await t('a deload drops by the same step it climbs by', () => {
-    const r = P.nextState({ weight: 185, target: 8 }, [8, 6, 8], P.stepFor('leg-press'));
+    const r = P.nextState({ weight: 185, target: 8 }, [8, 6, 8], { step: P.stepFor('leg-press') });
     assert.strictEqual(r.action, 'suggest-deload');
     assert.strictEqual(r.suggestWeight, 165, 'a leg press has no 5 lb pin either');
     assert.strictEqual(r.canDrop, true);
@@ -160,7 +161,7 @@ async function rules() {
 
   await t('the floor is one of the machine\'s own increments', () => {
     // 5 lb is not a leg press weight, so the floor moves up with the step.
-    const r = P.nextState({ weight: 20, target: 8 }, [3, 3, 3], 20);
+    const r = P.nextState({ weight: 20, target: 8 }, [3, 3, 3], { step: 20 });
     assert.strictEqual(r.suggestWeight, 20);
     assert.strictEqual(r.canDrop, false);
     assert.ok(/as light as this machine goes/.test(r.note),
@@ -176,6 +177,311 @@ async function rules() {
     }
     assert.deepStrictEqual(st, { weight: 100, target: 10 });
   });
+}
+
+/* ── 1c. the schedule ───────────────────────────────────────────────────────
+   Pure, and takes `today` as an argument rather than reading a clock, which is
+   the only reason any of this is testable. The rule that earns the most rows:
+   an overdue workout stays DUE. Quietly sliding it to tomorrow is how a schedule
+   stops meaning anything. */
+
+async function scheduleRules() {
+  console.log('\nschedule');
+  const SC = require('../lib/schedule');
+  // 2026-08-17 is a Monday. Every date below is picked off that week.
+  const MON = '2026-08-17', TUE = '2026-08-18', WED = '2026-08-19';
+  const THU = '2026-08-20', FRI = '2026-08-21', SUN = '2026-08-23';
+
+  await t('an unscheduled plan is never due and never overdue', () => {
+    const st = SC.statusOf({ mode: 'off' }, MON, null);
+    assert.strictEqual(st.due, false);
+    assert.strictEqual(st.next, null);
+  });
+
+  await t('weekdays: due on its days, silent on the others', () => {
+    const mwf = { mode: 'weekdays', days: [1, 3, 5] };
+    assert.strictEqual(SC.statusOf(mwf, MON, null).due, true, 'Monday is one of them');
+    assert.strictEqual(SC.statusOf(mwf, TUE, MON).due, false, 'Tuesday is not');
+    assert.strictEqual(SC.statusOf(mwf, TUE, MON).next, WED, 'and points at Wednesday');
+    assert.strictEqual(SC.statusOf(mwf, WED, MON).due, true);
+  });
+
+  await t('weekdays: doing it today clears today and looks past it', () => {
+    const mwf = { mode: 'weekdays', days: [1, 3, 5] };
+    const st = SC.statusOf(mwf, MON, MON);
+    assert.strictEqual(st.due, false, 'already done');
+    assert.strictEqual(st.doneToday, true);
+    assert.strictEqual(st.next, WED, 'the next one is Wednesday, not today again');
+  });
+
+  await t('weekdays: a missed day stays due, and says how overdue', () => {
+    // Scheduled Monday, last done the Monday before, now Thursday.
+    const st = SC.statusOf({ mode: 'weekdays', days: [1] }, THU, '2026-08-10');
+    assert.strictEqual(st.due, true, 'Monday came and went — it is still owed');
+    assert.strictEqual(st.overdueDays, 3, 'Mon -> Thu');
+    assert.strictEqual(st.next, THU, 'and reads as due NOW rather than on a past date');
+  });
+
+  await t('interval: every other day counts from the one you FINISHED', () => {
+    const every2 = { mode: 'interval', everyN: 2 };
+    assert.strictEqual(SC.statusOf(every2, MON, MON).next, WED, 'done Monday -> Wednesday');
+    assert.strictEqual(SC.statusOf(every2, TUE, MON).due, false, 'Tuesday is a rest day');
+    assert.strictEqual(SC.statusOf(every2, WED, MON).due, true);
+    // Skipping Wednesday does not reschedule to Friday — it is simply late.
+    const late = SC.statusOf(every2, FRI, MON);
+    assert.strictEqual(late.due, true);
+    assert.strictEqual(late.overdueDays, 2, 'due Wednesday, now Friday');
+  });
+
+  await t('interval: every 3 days, and every single day', () => {
+    assert.strictEqual(SC.statusOf({ mode: 'interval', everyN: 3 }, WED, MON).due, false);
+    assert.strictEqual(SC.statusOf({ mode: 'interval', everyN: 3 }, THU, MON).due, true);
+    assert.strictEqual(SC.statusOf({ mode: 'interval', everyN: 1 }, TUE, MON).due, true);
+  });
+
+  await t('interval: with no history at all it is due now, not never', () => {
+    const st = SC.statusOf({ mode: 'interval', everyN: 2 }, MON, null);
+    assert.strictEqual(st.due, true, 'a schedule you just set should start today');
+  });
+
+  await t('interval: an anchor stands in until there is a session to roll off', () => {
+    const st = SC.statusOf({ mode: 'interval', everyN: 2, anchor: MON }, TUE, null);
+    assert.strictEqual(st.due, false);
+    assert.strictEqual(st.next, WED);
+  });
+
+  await t('the day walk survives a DST change', () => {
+    // 2026-03-08 is the US spring-forward. Adding milliseconds lands at 23:00 the
+    // day before and would report the wrong day — the same trap calendar.js has a
+    // row for.
+    const st = SC.statusOf({ mode: 'interval', everyN: 2 }, '2026-03-10', '2026-03-08');
+    assert.strictEqual(st.due, true, 'two days after the 8th is the 10th, DST or not');
+    assert.strictEqual(SC.daysBetween('2026-03-08', '2026-03-10'), 2);
+    assert.strictEqual(SC.daysBetween('2026-11-01', '2026-11-03'), 2, 'and falling back');
+  });
+
+  await t('a schedule is sanitized into something that can be honoured', () => {
+    const c = SC.clean({ mode: 'nonsense', days: [9, 3, 3, -1, 0], everyN: 99, at: '25:00' });
+    assert.strictEqual(c.mode, 'off', 'an unknown mode is off, not a crash');
+    assert.deepStrictEqual(c.days, [0, 3], 'out-of-range dropped, deduped, sorted');
+    assert.strictEqual(c.everyN, SC.MAX_EVERY, 'clamped');
+    assert.strictEqual(c.at, '18:00', 'a bad time falls back rather than sticking');
+  });
+
+  await t('weekdays with no days picked is inert, not an infinite search', () => {
+    const st = SC.statusOf({ mode: 'weekdays', days: [] }, MON, null);
+    assert.strictEqual(st.due, false);
+    assert.strictEqual(st.next, null);
+  });
+
+  await t('a reminder fires once, after its time, only when due', () => {
+    const mon = { mode: 'weekdays', days: [1], at: '18:00' };
+    assert.strictEqual(SC.reminderDue(mon, MON, null, 17 * 60, null), false, 'not yet 18:00');
+    assert.strictEqual(SC.reminderDue(mon, MON, null, 18 * 60, null), true);
+    assert.strictEqual(SC.reminderDue(mon, MON, null, 19 * 60, MON), false, 'already sent today');
+    assert.strictEqual(SC.reminderDue(mon, TUE, null, 19 * 60, null), false, 'not a Monday');
+    assert.strictEqual(SC.reminderDue(mon, MON, MON, 19 * 60, null), false, 'already trained');
+  });
+
+  await t('every weekday resolves to itself, Sunday included', () => {
+    for (let d = 0; d <= 6; d++) {
+      const date = SC.nextOnOrAfter({ mode: 'weekdays', days: [d] }, MON, null);
+      assert.strictEqual(SC.dowOf(date), d, `day ${d}`);
+    }
+    assert.strictEqual(SC.nextOnOrAfter({ mode: 'weekdays', days: [0] }, MON, null), SUN);
+  });
+}
+
+/* ── 1d. the plan gate ──────────────────────────────────────────────────────
+   Every rule is now a knob, so the guards are what stop a plan being configured
+   into one that can never advance — which would look like a broken app rather
+   than a bad setting. */
+
+async function planRules() {
+  console.log('\nplans');
+  const PL = require('../lib/plan');
+
+  await t('a plan cannot be configured so the target can never move', () => {
+    const r = PL.cleanRules({ sets: 3, minReps: 8, maxReps: 12, repStep: 0 });
+    assert.ok(r.repStep >= 1, 'a zero rep step would sit at 8 forever');
+    const flat = PL.cleanRules({ minReps: 5, maxReps: 5, repStep: 9 });
+    assert.strictEqual(flat.repStep, 1, 'and it cannot exceed the range it steps through');
+  });
+
+  await t('maxReps can never sit below minReps', () => {
+    const r = PL.cleanRules({ minReps: 10, maxReps: 4 });
+    assert.strictEqual(r.minReps, 10);
+    assert.strictEqual(r.maxReps, 10, 'clamped up to meet it, not left inverted');
+  });
+
+  await t('a 5x5 plan advances by WEIGHT, since it has no rep rungs', () => {
+    const r = PL.cleanRules({ sets: 5, minReps: 5, maxReps: 5, repStep: 1 });
+    const out = P.nextState({ weight: 200, target: 5 }, [5, 5, 5, 5, 5], { ...r, step: 10 });
+    assert.strictEqual(out.action, 'weight-up', 'nowhere to send the target, so the bar goes up');
+    assert.strictEqual(out.weight, 210);
+    assert.strictEqual(out.target, 5);
+  });
+
+  await t('a plan with a longer ladder climbs every rung', () => {
+    const r = PL.cleanRules({ sets: 4, minReps: 5, maxReps: 8, repStep: 1 });
+    let st = { weight: 100, target: r.minReps };
+    const seen = [];
+    for (let i = 0; i < 5; i++) {
+      seen.push(st.target);
+      const out = P.nextState(st, Array(r.sets).fill(st.target), { ...r, step: 10 });
+      st = { weight: out.weight, target: out.target };
+    }
+    assert.deepStrictEqual(seen, [5, 6, 7, 8, 5], '5-6-7-8 then heavier and back to 5');
+    assert.strictEqual(st.weight, 110);
+  });
+
+  await t('a set count out of range is clamped, not honoured', () => {
+    assert.strictEqual(PL.cleanRules({ sets: 0 }).sets, 1);
+    assert.strictEqual(PL.cleanRules({ sets: 99 }).sets, 10);
+    assert.strictEqual(PL.cleanRules({ restSec: 2 }).restSec, 10);
+  });
+
+  await t('an exercise needs a name and a real weight step', () => {
+    assert.strictEqual(PL.cleanExercise({ name: '   ' }, 'e1'), null, 'no name, no machine');
+    const e = PL.cleanExercise({ name: 'Hack Squat', step: 0, weight: -5 }, 'e1');
+    assert.strictEqual(e.step, 1, 'a zero step would never move the weight');
+    assert.strictEqual(e.weight, 0);
+    // A second label only earns its place if it differs.
+    assert.strictEqual(PL.cleanExercise({ name: 'Row', short: 'Row' }, 'e2').short, null);
+  });
+
+  await t('a plan cannot hold a machine that does not exist', () => {
+    const cat = [{ id: 'a' }, { id: 'b' }];
+    const p = PL.cleanPlan({ name: 'A', exerciseIds: ['a', 'ghost', 'b', 'a'] }, 'p1', cat);
+    assert.deepStrictEqual(p.exerciseIds, ['a', 'b'],
+      'unknown dropped and duplicates collapsed — a dangling id is how `planned` ships undefined');
+  });
+
+  await t('the old single-program store folds into one plan, losing nothing', () => {
+    const before = {
+      progress: { 'leg-press': { weight: 165, target: 10 }, overhead: { weight: 35, target: 8 } },
+      workouts: [{ id: 'w1', done: true, date: '2026-08-01', entries: [] }],
+      settings: { restSec: 75, includeOptional: true },
+      seq: 1,
+    };
+    let n = 0;
+    PL.migrate(before, (p) => `${p}${++n}`);
+    assert.strictEqual(before.plans.length, 1);
+    const p = before.plans[0];
+    assert.strictEqual(before.activePlanId, p.id);
+    assert.strictEqual(p.rules.restSec, 75, 'the global rest setting became the plan\'s');
+    assert.strictEqual(p.exerciseIds.length, 6, 'includeOptional was true, so the leg curl came');
+    // The weights move under the plan, and nothing is left at the top level.
+    assert.deepStrictEqual(before.progress[p.id]['leg-press'], { weight: 165, target: 10 });
+    assert.strictEqual(before.progress['leg-press'], undefined);
+    assert.strictEqual(before.workouts[0].planId, p.id, 'old sessions belong to it too');
+  });
+
+  await t('a store that had the optional lift OFF keeps it off', () => {
+    const before = { progress: {}, workouts: [], settings: { includeOptional: false }, seq: 1 };
+    let n = 0;
+    PL.migrate(before, (p) => `${p}${++n}`);
+    assert.ok(!before.plans[0].exerciseIds.includes('leg-curl'),
+      'migrating must not silently add a lift someone had switched off');
+  });
+
+  await t('migrating twice changes nothing the second time', () => {
+    const st = { progress: { overhead: { weight: 35, target: 8 } }, workouts: [], settings: {}, seq: 1 };
+    let n = 0;
+    const mint = (p) => `${p}${++n}`;
+    PL.migrate(st, mint);
+    const once = JSON.stringify(st);
+    PL.migrate(st, mint);
+    assert.strictEqual(JSON.stringify(st), once, 'load is not a mutation you can stack');
+  });
+}
+
+/* ── 1e. the reminder sender ────────────────────────────────────────────────
+   lib/push.js is the one module here that touches the store, so this section
+   points DATA_FILE at a temp file BEFORE requiring it. Nothing else in this
+   process loads store.js, so the live data is never opened. `tick` takes its
+   clock as an argument, which is the only reason any of this is testable. */
+
+async function reminderSender() {
+  console.log('\nreminder sender');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-push-'));
+  process.env.DATA_FILE = path.join(dir, 'store.json');
+  process.env.CONFIG_FILE = path.join(dir, 'config.json');
+  fs.writeFileSync(process.env.DATA_FILE,
+    JSON.stringify({ progress: {}, workouts: [], settings: {}, seq: 1 }));
+
+  const store = require('../store');
+  const push = require('../lib/push');
+  assert.ok(store.FILE.startsWith(os.tmpdir()), 'refusing to run against the real store');
+  const st = store.state;
+  const at = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d; };
+  const today = require('../lib/calendar').dayStr(new Date());
+
+  await t('with nothing subscribed the sender does nothing at all', async () => {
+    st.plans[0].schedule = { mode: 'weekdays', days: [0, 1, 2, 3, 4, 5, 6], at: '06:00', everyN: 2, anchor: null };
+    assert.deepStrictEqual(await push.tick(at(9, 0)), [],
+      'a fresh checkout must stay silent, not error');
+  });
+
+  await t('a subscription is validated before it is stored', () => {
+    assert.strictEqual(push.addSub({ endpoint: 'ftp://nope' }), null, 'scheme');
+    assert.strictEqual(push.addSub({ endpoint: 'https://a.example/x' }), null, 'no keys');
+    // A REAL P-256 public key, so the send that follows fails because the service
+    // is unreachable and not because the key was nonsense — otherwise the retry
+    // test below would be measuring the wrong failure.
+    const ec = crypto.createECDH('prime256v1'); ec.generateKeys();
+    assert.ok(push.addSub({
+      endpoint: 'https://127.0.0.1:1/dead',
+      keys: { p256dh: ec.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') },
+    }), 'a well-formed one is kept');
+    assert.strictEqual(st.push.subs.length, 1);
+  });
+
+  await t('a send that fails is NOT marked sent, so a blip does not eat the nudge', async () => {
+    // Port 1 refuses instantly — a stand-in for "the push service is having a day".
+    assert.deepStrictEqual(await push.tick(at(7, 0)), [], 'nothing went out');
+    assert.strictEqual(st.push.sent[st.plans[0].id], undefined,
+      'marking it sent here would lose today\'s reminder for good');
+    assert.strictEqual(st.push.tried[st.plans[0].id].n, 1, 'but the attempt is counted');
+  });
+
+  await t('and retries are capped, so a broken endpoint goes quiet', async () => {
+    for (let i = 0; i < push.MAX_TRIES + 3; i++) await push.tick(at(7, i + 1));
+    assert.strictEqual(st.push.tried[st.plans[0].id].n, push.MAX_TRIES,
+      'an error logged every minute forever is its own kind of outage');
+  });
+
+  await t('before its time, nothing is attempted', async () => {
+    st.push.tried = {};
+    assert.deepStrictEqual(await push.tick(at(5, 30)), []);
+    assert.strictEqual(st.push.tried[st.plans[0].id], undefined, 'not even tried');
+  });
+
+  await t('a plan already trained today raises no reminder', async () => {
+    st.push.tried = {};
+    st.workouts.push({ id: 'w1', planId: st.plans[0].id, done: true, date: today, entries: [] });
+    assert.deepStrictEqual(await push.tick(at(9, 0)), []);
+    assert.strictEqual(st.push.tried[st.plans[0].id], undefined);
+    st.workouts.pop();
+  });
+
+  await t('an archived plan is never nagged about', async () => {
+    st.push.tried = {};
+    st.plans[0].archived = true;
+    assert.deepStrictEqual(await push.tick(at(9, 0)), []);
+    assert.strictEqual(st.push.tried[st.plans[0].id], undefined);
+    st.plans[0].archived = false;
+  });
+
+  await t('unsubscribing removes the device', () => {
+    assert.strictEqual(push.removeSub('https://127.0.0.1:1/dead'), 1);
+    assert.strictEqual(st.push.subs.length, 0);
+  });
+
+  push.stop();
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
+  delete process.env.DATA_FILE;
+  delete process.env.CONFIG_FILE;
 }
 
 /* ── 1b. the training calendar ─────────────────────────────────────────── */
@@ -329,6 +635,9 @@ const PORT = 3999;
 const BASE = `http://127.0.0.1:${PORT}`;
 let child = null;
 
+// The VAPID keypair is minted on first use into CONFIG_FILE. Pointed at the temp
+// dir so `npm test` never writes a config into the working tree, and NO_PUSH
+// keeps the once-a-minute sender out of the run entirely.
 function api(method, p, body) {
   return fetch(BASE + p, {
     method,
@@ -350,9 +659,10 @@ async function server() {
   console.log('\nserver / api');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-test-'));
   const dataFile = path.join(dir, 'store.json');
+  const cfgFile = path.join(dir, 'config.json');
 
   child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), DATA_FILE: dataFile },
+    env: { ...process.env, PORT: String(PORT), DATA_FILE: dataFile, CONFIG_FILE: cfgFile, NO_PUSH: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -366,22 +676,37 @@ async function server() {
     throw e;
   }
 
-  await t('GET /api/state seeds the program', async () => {
+  await t('a fresh store seeds a catalogue and one plan holding all of it', async () => {
     const { body } = await api('GET', '/api/state');
-    assert.strictEqual(body.planned.length, 5, 'leg curl excluded by default');
+    assert.strictEqual(body.exercises.length, 6, 'the catalogue is seeded');
+    assert.strictEqual(body.plans.length, 1, 'and one plan to start from');
+    const p = body.plans[0];
+    assert.strictEqual(body.activePlanId, p.id);
+    // `optional` is gone as a concept — a machine is in a plan or it isn't, and
+    // taking one out is now a tap rather than a hardcoded flag.
+    assert.strictEqual(p.exerciseIds.length, 6, 'all six are in the starter plan');
+    assert.strictEqual(body.planned.length, 6);
     assert.strictEqual(body.planned[0].id, 'leg-press');
     assert.strictEqual(body.planned[0].weight, 140);
-    assert.strictEqual(body.planned[0].target, 8);
-    assert.strictEqual(body.rules.restSec, 90);
-    assert.strictEqual(body.rules.sets, 3);
+    assert.strictEqual(body.planned[0].sets.length, 3, 'one blank per set in the rules');
+    assert.deepStrictEqual(body.rules,
+      { sets: 3, minReps: 8, maxReps: 12, repStep: 2, restSec: 90, weightStep: 5 },
+      'wire.rules is the ACTIVE plan\'s ladder, under the name the session screen uses');
+    assert.strictEqual(p.rulesLabel, '3 sets · 8 → 10 → 12 reps, then heavier');
   });
 
-  await t('enabling the optional lift adds it to the plan', async () => {
-    let { body } = await api('POST', '/api/settings', { includeOptional: true });
-    assert.strictEqual(body.planned.length, 6);
-    assert.ok(body.planned.some(p => p.id === 'leg-curl'));
-    ({ body } = await api('POST', '/api/settings', { includeOptional: false }));
-    assert.strictEqual(body.planned.length, 5);
+  await t('taking a machine out of a plan takes it out of the prescription', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const p = st.plans[0];
+    const without = p.exerciseIds.filter(x => x !== 'leg-curl');
+    const { body: a } = await api('PATCH', `/api/plan/${p.id}`, { exerciseIds: without });
+    assert.strictEqual(a.state.planned.length, 5);
+    assert.ok(!a.state.planned.some(x => x.id === 'leg-curl'));
+    // Back in, at the end — order is the order you perform them.
+    const { body: b } = await api('PATCH', `/api/plan/${p.id}`,
+      { exerciseIds: [...without, 'leg-curl'] });
+    assert.strictEqual(b.state.planned.length, 6);
+    assert.strictEqual(b.state.planned[5].id, 'leg-curl');
   });
 
   await t('finishing a workout advances the prescription', async () => {
@@ -623,12 +948,142 @@ async function server() {
       true, 'a refused un-skip must leave the entry exactly as it was');
   });
 
+  /* ── plans over HTTP ─────────────────────────────────────────────────── */
+
+  await t('a second plan copies the first rather than starting empty', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const { body } = await api('POST', '/api/plan', { copyOf: st.plans[0].id });
+    assert.strictEqual(body.plan.name, 'Workout B', 'named for you');
+    assert.deepStrictEqual(body.plan.exerciseIds, st.plans[0].exerciseIds,
+      '"B" is nearly always "A but different"');
+    assert.strictEqual(body.state.activePlanId, st.plans[0].id,
+      'creating a plan must not yank you out of the one you are mid-programme on');
+  });
+
+  await t('a copied plan starts at the weights you are actually lifting', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const [a, b] = st.plans;
+    const aLeg = st.progress['leg-press'].weight;
+    await api('POST', '/api/plan/active', { id: b.id });
+    const { body: bst } = await api('GET', '/api/state');
+    assert.strictEqual(bst.progress['leg-press'].weight, aLeg,
+      'not back at the seed weight from whenever the app was set up');
+    await api('POST', '/api/plan/active', { id: a.id });
+  });
+
+  await t('the same machine then progresses independently in each plan', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const [a, b] = st.plans;
+    const aBefore = st.progress['leg-press'];
+    // Finish a session on B, and check A did not move with it.
+    await api('POST', '/api/plan/active', { id: b.id });
+    const { body: bst } = await api('GET', '/api/state');
+    await api('POST', '/api/workout', {
+      id: 'w-planb', planId: b.id, done: true,
+      entries: bst.planned.map(p => ({ ...p, target: 12, sets: [12, 12, 12] })),
+    });
+    const { body: bAfter } = await api('GET', '/api/state');
+    const bLeg = bAfter.progress['leg-press'];
+    await api('POST', '/api/plan/active', { id: a.id });
+    const { body: aAfter } = await api('GET', '/api/state');
+    assert.deepStrictEqual(aAfter.progress['leg-press'], aBefore,
+      'a session on B must not touch A — that is the whole reason they are keyed apart');
+    assert.strictEqual(bLeg.weight, aBefore.weight + 20, 'B climbed by the leg press step');
+  });
+
+  await t('a plan can be given a 5x5 ladder and the prescription follows', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const b = st.plans[1];
+    const { body } = await api('PATCH', `/api/plan/${b.id}`, {
+      rules: { sets: 5, minReps: 5, maxReps: 5, repStep: 1 },
+    });
+    assert.strictEqual(body.plan.rules.sets, 5);
+    assert.strictEqual(body.plan.rulesLabel, '5 sets · 5 reps, then heavier');
+    await api('POST', '/api/plan/active', { id: b.id });
+    const { body: act } = await api('GET', '/api/state');
+    assert.strictEqual(act.planned[0].sets.length, 5, 'five blanks, not three');
+    assert.strictEqual(act.rules.minReps, 5);
+    await api('POST', '/api/plan/active', { id: st.plans[0].id });
+  });
+
+  await t('a plan gate rejects what would make it unusable', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const id = st.plans[0].id;
+    const { status } = await api('PATCH', `/api/plan/${id}`, { name: '   ' });
+    assert.strictEqual(status, 400, 'a plan must have a name');
+    const { body } = await api('PATCH', `/api/plan/${id}`, { rules: { repStep: 0 } });
+    assert.ok(body.plan.rules.repStep >= 1, 'a zero rep step is clamped, not stored');
+    const { body: g } = await api('PATCH', `/api/plan/${id}`, { exerciseIds: ['ghost'] });
+    assert.deepStrictEqual(g.plan.exerciseIds, [], 'unknown ids dropped');
+    // Put it back, or every later assertion is against an empty plan.
+    await api('PATCH', `/api/plan/${id}`, { exerciseIds: st.plans[0].exerciseIds });
+  });
+
+  await t('the last plan cannot be deleted', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    for (const p of st.plans.slice(1)) await api('DELETE', `/api/plan/${p.id}`);
+    const { body: one } = await api('GET', '/api/state');
+    assert.strictEqual(one.plans.length, 1);
+    const { status } = await api('DELETE', `/api/plan/${one.plans[0].id}`);
+    assert.strictEqual(status, 400, 'there has to be something to lift');
+  });
+
+  await t('a new machine joins the catalogue and the plan you added it from', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const id = st.plans[0].id;
+    const { body } = await api('POST', '/api/exercise', {
+      name: 'Hack Squat', step: 25, weight: 90, planId: id,
+    });
+    assert.strictEqual(body.exercise.step, 25);
+    const p = body.state.plans.find(x => x.id === id);
+    assert.ok(p.exerciseIds.includes(body.exercise.id), 'added where you added it from');
+    assert.strictEqual(body.state.planned[body.state.planned.length - 1].weight, 90,
+      'and it comes into the prescription at its own starting weight');
+  });
+
+  await t('deleting a machine pulls it from every plan but keeps the history', async () => {
+    const { body: st } = await api('GET', '/api/state');
+    const hack = st.exercises.find(e => e.name === 'Hack Squat');
+    const loggedBefore = st.workouts.length;
+    const { body } = await api('DELETE', `/api/exercise/${hack.id}`);
+    assert.ok(!body.exercises.some(e => e.id === hack.id));
+    assert.ok(!body.plans.some(p => p.exerciseIds.includes(hack.id)),
+      'a plan holding a dangling id is how `planned` ships undefined weights');
+    assert.strictEqual(body.workouts.length, loggedBefore,
+      'history is what happened — deleting a machine today must not rewrite it');
+  });
+
+  /* ── reminders ───────────────────────────────────────────────────────── */
+
+  await t('the wire ships a push key so a device can subscribe', async () => {
+    const { body } = await api('GET', '/api/state');
+    assert.ok(body.push.key && body.push.key.length > 20, 'a VAPID public key');
+    assert.strictEqual(body.push.subscribed, false, 'nothing has subscribed yet');
+  });
+
+  await t('a subscription is validated, stored once per device, and removable', async () => {
+    const sub = {
+      endpoint: 'https://push.example.com/abc',
+      keys: { p256dh: 'x'.repeat(80), auth: 'y'.repeat(20) },
+    };
+    assert.strictEqual((await api('POST', '/api/push/subscribe', { subscription: { endpoint: 'nope' } })).status,
+      400, 'a bad subscription is refused rather than stored');
+    const { body } = await api('POST', '/api/push/subscribe', { subscription: sub });
+    assert.strictEqual(body.push.subscribed, true);
+    // Re-subscribing the same device must not stack up duplicate notifications.
+    await api('POST', '/api/push/subscribe', { subscription: sub });
+    const { body: st } = await api('GET', '/api/state');
+    assert.strictEqual(st.push.subscribed, true);
+    const { body: gone } = await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint });
+    assert.strictEqual(gone.push.subscribed, false);
+  });
+
   await t('data survives a restart', async () => {
     const { body: before } = await api('GET', '/api/state');
     child.kill('SIGTERM');
     await new Promise(r => child.on('exit', r));
     child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-      env: { ...process.env, PORT: String(PORT), DATA_FILE: dataFile },
+      env: { ...process.env, PORT: String(PORT), DATA_FILE: dataFile, CONFIG_FILE: cfgFile, NO_PUSH: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     await waitUp();
@@ -645,6 +1100,9 @@ async function server() {
 
 (async () => {
   await rules();
+  await scheduleRules();
+  await planRules();
+  await reminderSender();
   await calendarGrid();
   await server();
   console.log(`\n${pass} passed, ${fails.length} failed`);

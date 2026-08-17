@@ -2,7 +2,7 @@
 import { S, LS, saveLocal, loadLocal } from './state.js';
 import { $, esc, mmss, todayStr, toast, showScreen, buzz } from './util.js';
 import { newWorkoutId, saveWorkout } from './sync.js';
-import { exName, exStep } from './home.js';
+import { exName, exStep, planRules } from './home.js';
 import { primeAudio, scheduleAlarm, cancelAlarm, notify } from './alarm.js';
 
 const RING_C = 339.29; // 2πr for r=54
@@ -27,6 +27,7 @@ function snapshot(done = false) {
   const s = S.session;
   return {
     id: s.id,
+    planId: s.planId,
     date: s.date,
     startedAt: s.startedAt,
     entries: s.entries.map(e => ({
@@ -40,10 +41,15 @@ function snapshot(done = false) {
 export function startSession() {
   primeAudio();
   if (!S.session) {
-    const planned = (S.wire?.planned || []).map(p => ({ ...p, sets: [null, null, null] }));
-    if (!planned.length) return toast('Nothing to lift');
+    // `planned` already arrives with the right number of empty sets for this
+    // plan's rules — don't overwrite it with three.
+    const planned = (S.wire?.planned || []).map(p => ({ ...p, sets: p.sets.map(() => null) }));
+    if (!planned.length) return toast('Nothing in this workout yet');
     S.session = {
       id: newWorkoutId(),
+      // Pinned at the start, not read at save time: you can switch plans while a
+      // session is open, and an offline replay can land days later.
+      planId: S.wire.activePlanId,
       date: todayStr(),
       startedAt: Date.now(),
       entries: planned,
@@ -141,8 +147,8 @@ export function renderSession() {
 
   $('exName').textContent = exName(e.id);
   $('exSub').textContent = e.skipped ? 'Skipped'
-    : set === -1 ? 'All 3 sets logged'
-    : `Set ${set + 1} of 3 · target ${e.target} reps`;
+    : set === -1 ? `All ${e.sets.length} sets logged`
+    : `Set ${set + 1} of ${e.sets.length} · target ${e.target} reps`;
   $('exWeight').textContent = e.weight;
 
   // Each dot's state comes from its own ENTRY, never from its position. Once the
@@ -186,7 +192,13 @@ export function renderSession() {
 
   const r = s.reps ?? e.target;
   $('repVal').textContent = r;
-  $('repChips').innerHTML = [8, 9, 10, 11, 12]
+  // The chips span this plan's own rep range, capped at six so they stay
+  // thumb-sized — a 5-to-20 plan gets a stepper, not forty chips.
+  const { minReps, maxReps } = planRules();
+  const span = [];
+  for (let n = minReps; n <= maxReps && span.length < 6; n++) span.push(n);
+  if (span[span.length - 1] !== maxReps) span[span.length - 1] = maxReps;
+  $('repChips').innerHTML = span
     .map(n => `<button data-r="${n}" class="${n === r ? 'on' : ''}">${n}</button>`).join('');
   $('repChips').querySelectorAll('button').forEach(b => {
     b.addEventListener('click', () => setReps(Number(b.dataset.r)));
@@ -194,7 +206,7 @@ export function renderSession() {
 }
 
 function setReps(n) {
-  S.session.reps = Math.max(0, Math.min(12, n));
+  S.session.reps = Math.max(0, Math.min(planRules().maxReps, n));
   persist();
   $('repVal').textContent = S.session.reps;
   $('repVal').classList.remove('pop'); void $('repVal').offsetWidth; $('repVal').classList.add('pop');
@@ -232,11 +244,11 @@ function logSet() {
   renderSession();
   const nextLabel = moveOn
     ? `Next: <b>${esc(exName(moveOn.id))}</b>`
-    : `Next: <b>Set ${set + 2} of 3</b>`;
+    : `Next: <b>Set ${set + 2} of ${e.sets.length}</b>`;
   // The same thing again without markup, for the notification body.
   const nextPlain = moveOn
     ? `Next up: ${exName(moveOn.id)}`
-    : `Set ${set + 2} of 3 · ${e.weight} lb`;
+    : `Set ${set + 2} of ${e.sets.length} · ${e.weight} lb`;
   startRest(nextLabel, () => {
     if (moveOn) goTo(s.entries.indexOf(moveOn));
     else { s.reps = e.target; persist(); renderSession(); }
@@ -270,7 +282,7 @@ function unskipExercise() {
   const e = cur();
   if (!e.skipped) return;
   e.skipped = false;
-  e.sets = [null, null, null];
+  e.sets = e.sets.map(() => null);
   S.session.reps = e.target;
   persist();
   saveWorkout(snapshot(false));
@@ -281,7 +293,7 @@ function skipExercise() {
   const s = S.session;
   const e = cur();
   e.skipped = true;
-  e.sets = [null, null, null];
+  e.sets = e.sets.map(() => null);
   persist();
   saveWorkout(snapshot(false));
   if (allSpent()) return finishSession();

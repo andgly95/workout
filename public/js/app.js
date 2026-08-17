@@ -6,6 +6,7 @@ import { initHome, renderHome } from './home.js';
 import { initSession, startSession, restoreSession, endSessionUI, renderSession } from './session.js';
 import { renderSummary } from './summary.js';
 import { initHistory, renderHistory } from './history.js';
+import { initPlan, openPlan } from './plan.js';
 
 function goHome() {
   endSessionUI();
@@ -37,11 +38,14 @@ async function boot() {
 
   restoreSession();
 
-  initHome(startSession, goHistory);
+  initHome(startSession, goHistory, openPlan);
   initSession(onFinish, goHome);
   // Correcting a skip changes the next prescription, so Today has to be redrawn
   // even though you're standing on the history screen when you do it.
   initHistory(renderHome);
+  // Editing the program changes today's prescription, so Home is redrawn on the
+  // way back out rather than only on the next load.
+  initPlan(renderHome, goHome);
   $('btnDoneClose').addEventListener('click', goHome);
   $('btnBackHome').addEventListener('click', goHome);
 

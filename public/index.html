@@ -30,13 +30,20 @@
     </header>
 
     <div class="scroll" id="homeScroll">
-      <div id="streakRow" class="streak-row"></div>
-      <div id="todayList" class="card-list"></div>
+      <!-- Only rendered once there are two plans to choose between. -->
+      <div id="planRow" class="seg plan-row" hidden></div>
 
-      <label class="opt-row">
-        <span><b>Leg Curl</b><small>optional — include in workouts</small></span>
-        <input type="checkbox" id="optLegCurl" class="switch">
-      </label>
+      <div id="streakRow" class="streak-row"></div>
+
+      <div class="plan-hd">
+        <div>
+          <b id="planName">—</b>
+          <small id="planMeta"></small>
+        </div>
+        <button class="link-btn" id="btnEditPlan">Edit</button>
+      </div>
+
+      <div id="todayList" class="card-list"></div>
 
       <label class="opt-row" id="alertRow">
         <span><b>Rest alerts</b><small id="alertSub">banner when the rest timer runs out</small></span>
@@ -126,6 +133,37 @@
     </div>
   </section>
 
+  <!-- ───────────── PLAN EDITOR ───────────── -->
+  <!-- Machines open, rules and schedule collapsed to a line of plain English
+       each. See the plan editor module for why that split. -->
+  <section id="scr-plan" class="screen">
+    <header class="topbar">
+      <button class="icon-btn" id="planBack" aria-label="Back">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <h1 id="planTitle">Workout</h1>
+      <button class="link-btn" id="planNew">+ New</button>
+    </header>
+    <div class="scroll" id="planScroll">
+      <label class="fld">
+        <span>Name</span>
+        <input id="planNameInput" type="text" maxlength="40" autocapitalize="words">
+      </label>
+
+      <div class="sec-hd">Machines, in order</div>
+      <div id="planMachines"></div>
+      <div class="add-row">
+        <button class="ghost" id="planAddExisting">Add one you have</button>
+        <button class="ghost" id="planAddEx">+ New machine</button>
+      </div>
+
+      <div id="planDiscs"></div>
+
+      <button class="danger" id="planDelete" hidden>Delete this workout</button>
+      <div class="pad-bottom"></div>
+    </div>
+  </section>
+
   <!-- ───────────── HISTORY ───────────── -->
   <section id="scr-history" class="screen">
     <header class="topbar">
@@ -143,6 +181,35 @@
     </div>
   </section>
 
+</div>
+
+<!-- One machine: what it's called and what its stack does. -->
+<div id="exSheet" class="modal" hidden>
+  <div class="modal-in">
+    <div class="modal-hd"><b id="exTitle">New machine</b></div>
+    <label class="fld"><span>Name</span>
+      <input id="exfName" type="text" maxlength="40" autocapitalize="words"></label>
+    <label class="fld"><span>Also known as <em>optional</em></span>
+      <input id="exfShort" type="text" maxlength="40" autocapitalize="words"></label>
+    <div class="two">
+      <label class="fld"><span>Starting weight</span>
+        <input id="exfWeight" type="number" inputmode="numeric" min="0" max="2000"></label>
+      <label class="fld"><span>Goes up by</span>
+        <input id="exfStep" type="number" inputmode="numeric" min="1" max="100"></label>
+    </div>
+    <button class="primary big" id="exSave">Save</button>
+    <button class="danger" id="exDelete" hidden>Delete machine everywhere</button>
+    <button class="ghost" id="exCancel">Cancel</button>
+  </div>
+</div>
+
+<!-- Machines you already have that aren't in this workout. -->
+<div id="pickSheet" class="modal" hidden>
+  <div class="modal-in">
+    <div class="modal-hd"><b>Add a machine</b><span>Already in your list</span></div>
+    <div id="pickList" class="pick-list"></div>
+    <button class="ghost" id="pickCancel">Cancel</button>
+  </div>
 </div>
 
 <!-- Correcting an accidental skip on a workout that's already logged. -->

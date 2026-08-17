@@ -27,6 +27,24 @@ self.addEventListener('notificationclick', (e) => {
   );
 });
 
+// A scheduled reminder, pushed from the Pi. This is the ONE alert that arrives
+// with the app closed — the rest tone can't work this way (it has to fire ninety
+// seconds from now, possibly with no signal) and a daily nudge can't work the
+// other way (nothing on the device is awake to raise it). See lib/push.js.
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) {}
+  e.waitUntil(self.registration.showNotification(d.title || 'Lift', {
+    body: [d.body, d.detail].filter(Boolean).join('\n'),
+    // Its own tag, so a reminder never replaces a live rest alert or vice versa.
+    tag: 'lift-due',
+    renotify: true,
+    icon: '/icon-192.png',
+    badge: '/icon-192.png',
+    data: { url: '/' },
+  }));
+});
+
 self.addEventListener('fetch', (e) => {
   const { request } = e;
   if (request.method !== 'GET') return;

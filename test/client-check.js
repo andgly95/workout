@@ -47,7 +47,12 @@ function connectCdp(wsUrl) {
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-cc-'));
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: { ...process.env, PORT: String(PORT), DATA_FILE: path.join(dir, 'store.json') },
+    env: {
+      ...process.env, PORT: String(PORT), DATA_FILE: path.join(dir, 'store.json'),
+      // Keeps the minted VAPID keypair out of the working tree, and the once-a-
+      // minute reminder sender out of the run.
+      CONFIG_FILE: path.join(dir, 'config.json'), NO_PUSH: '1',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let slog = '';
@@ -119,18 +124,142 @@ function connectCdp(wsUrl) {
 
     const check = (cond, msg) => { if (!cond) throw new Error(msg); };
 
-    // Home renders the program.
+    // Ask the layout, not the property: an author `display` rule can defeat
+    // [hidden] and leave the rest overlay covering the whole session screen.
+    const visible = (id) => evalJs(
+      `(() => { const e = document.getElementById('${id}');
+        return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); })()`);
+
+    // Home renders the starter plan — all six seeded machines.
     const cards = await evalJs(`document.querySelectorAll('#todayList .ex-card').length`);
-    check(cards === 5, `expected 5 exercise cards, got ${cards}`);
+    check(cards === 6, `expected 6 exercise cards, got ${cards}`);
     const firstCard = await evalJs(`document.querySelector('#todayList .ex-card').innerText.replace(/\\n/g,' ')`);
     check(/Leg Press/.test(firstCard) && /140 lb/.test(firstCard), `bad first card: ${firstCard}`);
 
-    // Optional lift toggles in and back out.
-    await evalJs(`document.getElementById('optLegCurl').click()`);
+    // ── progressive disclosure: one plan shows no picker ─────────────────
+    // With a single plan the home screen has to be exactly what it was before
+    // plans existed. A list of one is not a choice.
+    check(!(await visible('planRow')), 'the plan picker must stay hidden with one plan');
+    check(/My workout/.test(await evalJs(`document.getElementById('planName').innerText`)),
+      'the plan name should be on the home screen');
+    check(/8 → 10 → 12/.test(await evalJs(`document.getElementById('planMeta').innerText`)),
+      'the ladder should be stated in words, from the server');
+
+    // ── the plan editor ─────────────────────────────────────────────────
+    await evalJs(`document.getElementById('btnEditPlan').click()`);
     await sleep(500);
-    check(await evalJs(`document.querySelectorAll('#todayList .ex-card').length`) === 6, 'leg curl did not appear');
-    await evalJs(`document.getElementById('optLegCurl').click()`);
+    check(await visible('scr-plan'), 'the plan editor did not open');
+    check(await evalJs(`document.querySelectorAll('#planMachines .pm-row').length`) === 6,
+      'every machine should be listed and reorderable');
+    // Both settings sections are collapsed: the summary line is readable without
+    // opening anything, and the knobs are one tap away.
+    check(await evalJs(`document.querySelectorAll('#planDiscs .disc').length`) === 2,
+      'expected the overload and schedule sections');
+    check(await evalJs(`document.querySelectorAll('#planDiscs .disc-bd').length`) === 0,
+      'both sections must start collapsed — that is the disclosure');
+    check(/8 → 10 → 12/.test(await evalJs(`document.querySelector('#planDiscs .disc-hd small').innerText`)),
+      'the collapsed overload section should say what it does');
+
+    // Reorder: the leg press moves down and the prescription follows.
+    await evalJs(`document.querySelector('#planMachines .pm-row [data-move="1"]').click()`);
+    await sleep(600);
+    check(/Chest Press/.test(await evalJs(`document.querySelector('#planMachines .pm-bd b').innerText`)),
+      'moving the first machine down did not reorder the plan');
+    // Put it back — the rest of this run exercises the known program.
+    await evalJs(`document.querySelectorAll('#planMachines .pm-row')[1].querySelector('[data-move="-1"]').click()`);
+    await sleep(600);
+    check(/Leg Press/.test(await evalJs(`document.querySelector('#planMachines .pm-bd b').innerText`)),
+      'moving it back up did not restore the order');
+
+    // Drop one, and it leaves the prescription.
+    await evalJs(`document.querySelectorAll('#planMachines .pm-row [data-drop]')[5].click()`);
+    await sleep(600);
+    check(await evalJs(`document.querySelectorAll('#planMachines .pm-row').length`) === 5,
+      'removing a machine did not take it out of the plan');
+
+    // Open the overload section and change the ladder.
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[0].click()`);
+    await sleep(300);
+    check(await visible('planDiscs'), 'the disclosure body is not on screen');
+    check(await evalJs(`document.querySelectorAll('#planDiscs .disc-bd .fix-row').length`) === 5,
+      'expected sets / min / max / step / rest');
+    await evalJs(`document.querySelector('#planDiscs [data-rule="sets"][data-d="1"]').click()`);
+    await sleep(600);
+    check(/4 sets/.test(await evalJs(`document.querySelector('#planDiscs .disc-hd small').innerText`)),
+      'the summary must follow the change it describes');
+
+    // ── the schedule ────────────────────────────────────────────────────
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[1].click()`);
+    await sleep(300);
+    await evalJs(`document.querySelector('#planDiscs [data-mode="interval"]').click()`);
+    await sleep(600);
+    check(/Every 2 days/.test(await evalJs(`document.querySelectorAll('#planDiscs .disc-hd small')[1].innerText`)),
+      'every-other-day should read back as such');
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[1].click()`);
+    await sleep(200);
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[1].click()`);
+    await sleep(300);
+    await evalJs(`document.querySelector('#planDiscs [data-mode="weekdays"]').click()`);
+    await sleep(600);
+    await evalJs(`document.querySelector('#planDiscs [data-dow="3"]').click()`);
+    await sleep(600);
+    check(/Wed/.test(await evalJs(`document.querySelectorAll('#planDiscs .disc-hd small')[1].innerText`)),
+      'picking a weekday should read back as that day');
+
+    // A schedule with no history behind it is due NOW — deterministic whatever day
+    // this suite runs on, unlike a weekday rule.
+    await evalJs(`document.querySelector('#planDiscs [data-mode="interval"]').click()`);
+    await sleep(700);
+    check(/every.*day/i.test(await evalJs(`document.getElementById('pushNote').innerText`))
+      || (await evalJs(`document.getElementById('pushNote').innerText`)).length > 10,
+      'the reminder note should say whether it can actually reach you');
+    await evalJs(`document.getElementById('planBack').click()`);
+    await sleep(600);
+    check(/Due today/.test(await evalJs(`document.getElementById('homeSub').innerText`)),
+      `a scheduled plan with no history should read as due: ${await evalJs(`document.getElementById('homeSub').innerText`)}`);
+    check(await evalJs(`document.getElementById('homeSub').classList.contains('due')`),
+      'and it is the one thing on this screen worth colouring');
+    // Back off the schedule so the rest of the run is unscheduled.
+    await evalJs(`document.getElementById('btnEditPlan').click()`);
+    await sleep(400);
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[1].click()`);
+    await sleep(300);
+    await evalJs(`document.querySelector('#planDiscs [data-mode="off"]').click()`);
+    await sleep(600);
+
+    // ── a second plan, and the picker appearing ─────────────────────────
+    await evalJs(`document.getElementById('planNew').click()`);
+    await sleep(800);
+    check(/Workout B/.test(await evalJs(`document.getElementById('planTitle').innerText`)),
+      'a new plan should be named for you');
+    check(await evalJs(`document.querySelectorAll('#planMachines .pm-row').length`) === 5,
+      'a new plan copies the one you were looking at rather than starting empty');
+    await evalJs(`document.getElementById('planBack').click()`);
     await sleep(500);
+    check(await visible('planRow'), 'two plans must surface the picker');
+    check(await evalJs(`document.querySelectorAll('#planRow [data-plan]').length`) === 2,
+      'expected a chip per plan');
+
+    // Switching plans switches the prescription, and each keeps its own weights.
+    await evalJs(`document.querySelectorAll('#planRow [data-plan]')[1].click()`);
+    await sleep(700);
+    check(/Workout B/.test(await evalJs(`document.getElementById('planName').innerText`)),
+      'tapping a chip did not switch plans');
+    await evalJs(`document.querySelectorAll('#planRow [data-plan]')[0].click()`);
+    await sleep(700);
+    check(/My workout/.test(await evalJs(`document.getElementById('planName').innerText`)),
+      'could not switch back');
+    // Put the plan back to three sets so the rest of the run is the known program.
+    await evalJs(`document.getElementById('btnEditPlan').click()`);
+    await sleep(400);
+    await evalJs(`document.querySelectorAll('#planDiscs .disc-hd')[0].click()`);
+    await sleep(300);
+    await evalJs(`document.querySelector('#planDiscs [data-rule="sets"][data-d="-1"]').click()`);
+    await sleep(600);
+    await evalJs(`document.getElementById('planBack').click()`);
+    await sleep(500);
+    check(await evalJs(`document.querySelectorAll('#todayList .ex-card').length`) === 5,
+      'home should show the five machines the plan now has');
 
     // Start and run the whole workout: 5 exercises x 3 sets.
     await evalJs(`document.getElementById('btnStart').click()`);
@@ -138,11 +267,6 @@ function connectCdp(wsUrl) {
     check(await evalJs(`document.getElementById('scr-session').classList.contains('active')`), 'session screen did not open');
     check(/Leg Press/.test(await evalJs(`document.getElementById('exName').innerText`)), 'wrong first exercise');
 
-    // Ask the layout, not the property: an author `display` rule can defeat
-    // [hidden] and leave the rest overlay covering the whole session screen.
-    const visible = (id) => evalJs(
-      `(() => { const e = document.getElementById('${id}');
-        return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); })()`);
     check(!(await visible('restPane')), 'rest overlay is covering the session screen');
 
     // Weight stepper — one notch is the MACHINE's step, so the leg press moves 20.
