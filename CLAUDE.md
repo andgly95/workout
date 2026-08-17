@@ -8,7 +8,7 @@ tunnel, so the app itself has no login. Multi-user is **not** built; making the
 program customisable was the prerequisite for it, not the same job.
 
 Live at **https://workout.guess-ai.app** (Cloudflare tunnel `hot-seat` → `localhost:3003`).
-Repo: `github.com/andgly95/workout` (private).
+Repo: `github.com/andgly95/workout` (**public**).
 
 ## Stack
 
