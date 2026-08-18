@@ -17,8 +17,34 @@
 
 <div id="app">
 
+  <!-- ───────────── SIGN IN ─────────────
+       Sits above every other screen: nothing behind it renders until the server
+       says who you are. -->
+  <section id="scr-auth" class="screen auth">
+    <div class="auth-in">
+      <h1 class="auth-mark">Lift</h1>
+
+      <div id="authSignIn">
+        <p class="auth-lede">Progressive overload, tracked properly.<br>
+          Build your own workouts and let the app do the arithmetic.</p>
+        <div id="gbtn" class="gbtn"></div>
+      </div>
+
+      <div id="authPending" hidden>
+        <p class="auth-lede">You're signed in as <b id="authPendingWho"></b>.<br>
+          Lift is invite-only — Andrew has to let you in.</p>
+        <button class="ghost" id="authRefresh">Check again</button>
+        <button class="ghost" id="authSignOut">Sign out</button>
+      </div>
+
+      <p class="auth-note" id="authNote" hidden></p>
+    </div>
+  </section>
+
   <!-- ───────────── HOME ───────────── -->
-  <section id="scr-home" class="screen active">
+  <!-- NOT `active` — nothing renders until the server has said who you are.
+       A brief blank beats laying out a screen behind the sign-in gate. -->
+  <section id="scr-home" class="screen">
     <header class="topbar">
       <div>
         <h1>Lift</h1>
@@ -33,6 +59,9 @@
       <!-- Only rendered once there are two plans to choose between. -->
       <div id="planRow" class="seg plan-row" hidden></div>
 
+      <!-- Only the owner ever sees this, and only when somebody is waiting. -->
+      <div id="pendingCard" class="pending-card" hidden></div>
+
       <div id="streakRow" class="streak-row"></div>
 
       <div class="plan-hd">
@@ -44,6 +73,11 @@
       </div>
 
       <div id="todayList" class="card-list"></div>
+
+      <div class="opt-row account-row" id="accountRow" hidden>
+        <span><b id="acctName">—</b><small id="acctEmail"></small></span>
+        <button class="link-btn" id="btnSignOut">Sign out</button>
+      </div>
 
       <label class="opt-row" id="alertRow">
         <span><b>Rest alerts</b><small id="alertSub">banner when the rest timer runs out</small></span>

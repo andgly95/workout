@@ -1,7 +1,8 @@
 // Today screen — the prescription for the next workout.
 import { S } from './state.js';
 import { $, esc, dayLabel, todayStr, parseDay, toast } from './util.js';
-import { setActivePlan, subscribePush } from './sync.js';
+import { setActivePlan, subscribePush, decideUser } from './sync.js';
+import { signOut } from './auth.js';
 import { alertsSupported, alertsOn, enableAlerts, muteAlerts } from './alarm.js';
 
 let onEditPlan = () => {};
@@ -146,9 +147,47 @@ export function renderHome() {
     </div>`;
   }).join('') || '<div class="empty-note">No exercises.</div>';
 
+  renderPending();
+  renderAccount();
+
   $('btnStart').textContent = S.session ? 'Resume workout' : 'Start workout';
   $('btnStart').disabled = !plan || !plan.exerciseIds.length;
   renderAlertRow();
+}
+
+// People waiting to be let in. Only the owner is ever sent this list — the wire
+// ships `pending: []` to everybody else, so there is nothing here to hide.
+function renderPending() {
+  const list = (S.wire?.pending) || [];
+  const card = $('pendingCard');
+  card.hidden = !list.length;
+  if (!list.length) return;
+  card.innerHTML = `<b>${list.length} ${list.length === 1 ? 'person wants' : 'people want'} in</b>`
+    + list.map(u => `<div class="pend-row" data-uid="${esc(u.id)}">
+        <div class="who"><b>${esc(u.name || u.email)}</b><small>${esc(u.email)}</small></div>
+        <button class="yes" data-yes aria-label="Let them in">✓</button>
+        <button class="no" data-no aria-label="Turn them away">✕</button>
+      </div>`).join('');
+  card.querySelectorAll('[data-uid]').forEach((row) => {
+    const id = row.dataset.uid;
+    row.querySelector('[data-yes]').addEventListener('click', () => decide(id, 'active'));
+    row.querySelector('[data-no]').addEventListener('click', () => decide(id, 'denied'));
+  });
+}
+
+async function decide(id, status) {
+  const ok = await decideUser(id, status);
+  if (!ok) return toast('Could not save that');
+  renderHome();
+  toast(status === 'active' ? 'Let them in' : 'Turned away');
+}
+
+function renderAccount() {
+  const me = S.wire?.me;
+  $('accountRow').hidden = !me;
+  if (!me) return;
+  $('acctName').textContent = me.name || me.email;
+  $('acctEmail').textContent = me.owner ? `${me.email} · you own this` : me.email;
 }
 
 // The switch controls the BANNER only. The tone is scheduled on the audio thread
@@ -174,6 +213,7 @@ export function initHome(onStart, onHistory, onEdit) {
   $('btnStart').addEventListener('click', onStart);
   $('btnHistory').addEventListener('click', onHistory);
   $('btnEditPlan').addEventListener('click', () => onEditPlan(S.wire?.activePlanId));
+  $('btnSignOut').addEventListener('click', signOut);
   // The permission prompt only works from a gesture, which this is.
   $('optAlerts').addEventListener('change', async (e) => {
     if (!e.target.checked) { muteAlerts(true); return renderAlertRow(); }

@@ -45,6 +45,10 @@ export function applyWire(w) {
 export async function fetchState() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
+    // The session ran out, or was revoked. Reload rather than limping along with
+    // a cached wire that no longer belongs to anybody — app.js will land on the
+    // sign-in screen.
+    if (r.status === 401) { localStorage.removeItem('liftWasIn'); location.reload(); return null; }
     if (!r.ok) throw new Error(r.status);
     applyWire(await r.json());
     setOnline(true);
@@ -95,6 +99,13 @@ export async function unskipEntry(workoutId, id, sets) {
    Plans and machines are edited at a desk, not mid-set, so unlike a workout
    snapshot none of this is queued offline — it fails and says so. `applyWire` on
    every reply keeps one copy of the truth. */
+
+// Owner only — the server refuses it for anyone else, so this is a convenience,
+// not the guard.
+export async function decideUser(id, status) {
+  try { applyWire(await post(`/api/admin/user/${id}`, { status })); return true; }
+  catch (_) { return false; }
+}
 
 export async function patchPlan(id, patch) {
   try { applyWire((await post(`/api/plan/${id}`, patch, 'PATCH')).state); return true; }

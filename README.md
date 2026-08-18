@@ -11,6 +11,18 @@ Node + Express, vanilla ES modules, a JSON file for storage, **no build step**.
 
 Three sets, ninety seconds' rest, 8–12 reps, on the same machines every time.
 
+## Accounts
+
+Sign in with Google. The person who owns the instance is let in automatically;
+everyone else lands in a queue and gets approved from inside the app. Each person
+has their own machines, their own plans, their own weights and their own history —
+nothing is shared, and no route anywhere accepts a user id, so there is no handler
+that can forget to check one against your session.
+
+Self-hosting it needs a Google OAuth **Web application** client ID in
+`config.local.json` (gitignored). No client secret: ID tokens are verified against
+Google's public keys.
+
 ## Build your own workouts
 
 The program is data, not code. A **plan** is a named workout — an ordered list of

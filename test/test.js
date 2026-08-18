@@ -412,70 +412,75 @@ async function reminderSender() {
 
   const store = require('../store');
   const push = require('../lib/push');
+  const PL = require('../lib/plan');
   assert.ok(store.FILE.startsWith(os.tmpdir()), 'refusing to run against the real store');
+  // Push is per-user now: one active person, one slice, their own devices.
   const st = store.state;
+  st.users = { u1: { id: 'u1', email: 'a@b.c', status: 'active', owner: true } };
+  st.data = { u1: PL.seedUserData(store.nextId) };
+  const d = st.data.u1;
   const at = (h, m) => { const d = new Date(); d.setHours(h, m, 0, 0); return d; };
   const today = require('../lib/calendar').dayStr(new Date());
 
   await t('with nothing subscribed the sender does nothing at all', async () => {
-    st.plans[0].schedule = { mode: 'weekdays', days: [0, 1, 2, 3, 4, 5, 6], at: '06:00', everyN: 2, anchor: null };
+    d.plans[0].schedule = { mode: 'weekdays', days: [0, 1, 2, 3, 4, 5, 6], at: '06:00', everyN: 2, anchor: null };
     assert.deepStrictEqual(await push.tick(at(9, 0)), [],
       'a fresh checkout must stay silent, not error');
   });
 
   await t('a subscription is validated before it is stored', () => {
-    assert.strictEqual(push.addSub({ endpoint: 'ftp://nope' }), null, 'scheme');
-    assert.strictEqual(push.addSub({ endpoint: 'https://a.example/x' }), null, 'no keys');
+    assert.strictEqual(push.addSub(d, { endpoint: 'ftp://nope' }), null, 'scheme');
+    assert.strictEqual(push.addSub(d, { endpoint: 'https://a.example/x' }), null, 'no keys');
     // A REAL P-256 public key, so the send that follows fails because the service
     // is unreachable and not because the key was nonsense — otherwise the retry
     // test below would be measuring the wrong failure.
     const ec = crypto.createECDH('prime256v1'); ec.generateKeys();
-    assert.ok(push.addSub({
+    assert.ok(push.addSub(d, {
       endpoint: 'https://127.0.0.1:1/dead',
       keys: { p256dh: ec.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') },
     }), 'a well-formed one is kept');
-    assert.strictEqual(st.push.subs.length, 1);
+    assert.strictEqual(d.push.subs.length, 1);
   });
 
   await t('a send that fails is NOT marked sent, so a blip does not eat the nudge', async () => {
     // Port 1 refuses instantly — a stand-in for "the push service is having a day".
     assert.deepStrictEqual(await push.tick(at(7, 0)), [], 'nothing went out');
-    assert.strictEqual(st.push.sent[st.plans[0].id], undefined,
+    assert.strictEqual(d.push.sent[d.plans[0].id], undefined,
       'marking it sent here would lose today\'s reminder for good');
-    assert.strictEqual(st.push.tried[st.plans[0].id].n, 1, 'but the attempt is counted');
+    assert.strictEqual(d.push.tried[d.plans[0].id].n, 1, 'but the attempt is counted');
   });
 
   await t('and retries are capped, so a broken endpoint goes quiet', async () => {
     for (let i = 0; i < push.MAX_TRIES + 3; i++) await push.tick(at(7, i + 1));
-    assert.strictEqual(st.push.tried[st.plans[0].id].n, push.MAX_TRIES,
+    assert.strictEqual(d.push.tried[d.plans[0].id].n, push.MAX_TRIES,
       'an error logged every minute forever is its own kind of outage');
   });
 
   await t('before its time, nothing is attempted', async () => {
-    st.push.tried = {};
+    d.push.tried = {};
     assert.deepStrictEqual(await push.tick(at(5, 30)), []);
-    assert.strictEqual(st.push.tried[st.plans[0].id], undefined, 'not even tried');
+    assert.strictEqual(d.push.tried[d.plans[0].id], undefined, 'not even tried');
   });
 
   await t('a plan already trained today raises no reminder', async () => {
-    st.push.tried = {};
-    st.workouts.push({ id: 'w1', planId: st.plans[0].id, done: true, date: today, entries: [] });
+    d.push.tried = {};
+    d.workouts.push({ id: 'w1', planId: d.plans[0].id, done: true, date: today, entries: [] });
     assert.deepStrictEqual(await push.tick(at(9, 0)), []);
-    assert.strictEqual(st.push.tried[st.plans[0].id], undefined);
-    st.workouts.pop();
+    assert.strictEqual(d.push.tried[d.plans[0].id], undefined);
+    d.workouts.pop();
   });
 
   await t('an archived plan is never nagged about', async () => {
-    st.push.tried = {};
-    st.plans[0].archived = true;
+    d.push.tried = {};
+    d.plans[0].archived = true;
     assert.deepStrictEqual(await push.tick(at(9, 0)), []);
-    assert.strictEqual(st.push.tried[st.plans[0].id], undefined);
-    st.plans[0].archived = false;
+    assert.strictEqual(d.push.tried[d.plans[0].id], undefined);
+    d.plans[0].archived = false;
   });
 
   await t('unsubscribing removes the device', () => {
-    assert.strictEqual(push.removeSub('https://127.0.0.1:1/dead'), 1);
-    assert.strictEqual(st.push.subs.length, 0);
+    assert.strictEqual(push.removeSub(d, 'https://127.0.0.1:1/dead'), 1);
+    assert.strictEqual(d.push.subs.length, 0);
   });
 
   push.stop();
@@ -638,18 +643,50 @@ let child = null;
 // The VAPID keypair is minted on first use into CONFIG_FILE. Pointed at the temp
 // dir so `npm test` never writes a config into the working tree, and NO_PUSH
 // keeps the once-a-minute sender out of the run entirely.
-function api(method, p, body) {
+//
+// AUTH: every data route needs a session. Rather than a test-only bypass in
+// production code — which is how a bypass eventually ships — the suite pre-writes
+// the session secret into CONFIG_FILE and the users into the store, then signs its
+// own cookies with exactly the code the server verifies with.
+const AUTH = require('../lib/auth');
+const SECRET = 'test-secret-not-a-real-one-0123456789';
+const OWNER = 'g-owner', FRIEND = 'g-friend', WAITING = 'g-waiting';
+const cookieFor = (uid) => `${AUTH.COOKIE}=${encodeURIComponent(AUTH.sign(uid, SECRET))}`;
+
+// Defaults to the owner. Pass `as` to speak as somebody else, or null to be
+// signed out.
+function api(method, p, body, as = OWNER) {
+  const headers = {};
+  if (body) headers['content-type'] = 'application/json';
+  if (as) headers.cookie = cookieFor(as);
   return fetch(BASE + p, {
-    method,
-    headers: body ? { 'content-type': 'application/json' } : {},
+    method, headers,
     body: body ? JSON.stringify(body) : undefined,
   }).then(async (r) => ({ status: r.status, body: await r.json().catch(() => null) }));
+}
+
+// The three people every assertion below runs against.
+function seedUsers(storeFile, cfgFile) {
+  const person = (id, email, extra) => ({
+    id, email, name: email.split('@')[0], picture: null,
+    status: 'active', owner: false, createdAt: 1, lastSeen: 1, ...extra,
+  });
+  fs.writeFileSync(storeFile, JSON.stringify({
+    users: {
+      [OWNER]: person(OWNER, 'owner@example.com', { owner: true }),
+      [FRIEND]: person(FRIEND, 'friend@example.com'),
+      [WAITING]: person(WAITING, 'waiting@example.com', { status: 'pending' }),
+    },
+    data: {}, legacy: null, seq: 1,
+  }));
+  fs.writeFileSync(cfgFile, JSON.stringify({ sessionSecret: SECRET }), { mode: 0o600 });
 }
 
 async function waitUp(ms = 10000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    try { const r = await fetch(BASE + '/api/state'); if (r.ok) return; } catch (_) {}
+    // Not /api/state — that is 401 without a session now, which is the point.
+    try { const r = await fetch(BASE + '/api/auth/me'); if (r.ok) return; } catch (_) {}
     await new Promise(r => setTimeout(r, 150));
   }
   throw new Error('server did not start');
@@ -660,6 +697,7 @@ async function server() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-test-'));
   const dataFile = path.join(dir, 'store.json');
   const cfgFile = path.join(dir, 'config.json');
+  seedUsers(dataFile, cfgFile);
 
   child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
     env: { ...process.env, PORT: String(PORT), DATA_FILE: dataFile, CONFIG_FILE: cfgFile, NO_PUSH: '1' },
@@ -1076,6 +1114,223 @@ async function server() {
     assert.strictEqual(st.push.subscribed, true);
     const { body: gone } = await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint });
     assert.strictEqual(gone.push.subscribed, false);
+  });
+
+  /* ── auth ────────────────────────────────────────────────────────────────
+     The boundary. Everything else in this suite is a feature; this is the part
+     that decides whether handing the URL to a friend is safe. */
+
+  await t('signed out, the whole data surface is 401', async () => {
+    for (const [m, p, b] of [
+      ['GET', '/api/state'], ['POST', '/api/workout', { entries: [] }],
+      ['POST', '/api/plan', {}], ['PATCH', '/api/plan/p1', {}], ['DELETE', '/api/plan/p1'],
+      ['POST', '/api/exercise', { name: 'x' }], ['PATCH', '/api/exercise/e1', {}],
+      ['DELETE', '/api/exercise/e1'], ['POST', '/api/adjust', {}],
+      ['POST', '/api/settings', {}], ['POST', '/api/push/subscribe', {}],
+      ['POST', '/api/plan/active', {}], ['GET', '/api/admin/users'],
+    ]) {
+      const { status } = await api(m, p, b, null);
+      assert.strictEqual(status, 401, `${m} ${p} must not answer a stranger`);
+    }
+  });
+
+  await t('a forged or tampered cookie is not a session', async () => {
+    const real = AUTH.sign(OWNER, SECRET);
+    const bad = [
+      'nonsense',
+      real.slice(0, -1) + (real.slice(-1) === 'a' ? 'b' : 'a'),   // flipped signature
+      AUTH.sign(OWNER, 'a-different-secret-entirely-0123456789'), // signed by someone else
+      `${Buffer.from(JSON.stringify({ u: OWNER, e: Date.now() + 1e9 })).toString('base64url')}.`,
+    ];
+    for (const token of bad) {
+      const r = await fetch(BASE + '/api/state', { headers: { cookie: `${AUTH.COOKIE}=${token}` } });
+      assert.strictEqual(r.status, 401, `accepted a bad cookie: ${token.slice(0, 24)}`);
+    }
+  });
+
+  await t('an expired session is refused even though it is correctly signed', () => {
+    const past = AUTH.sign(OWNER, SECRET, Date.now() - (AUTH.MAX_AGE_DAYS + 1) * 86400000);
+    assert.strictEqual(AUTH.verify(past, SECRET), null);
+    assert.strictEqual(AUTH.verify(AUTH.sign(OWNER, SECRET), SECRET), OWNER, 'a fresh one still works');
+  });
+
+  await t('a pending user gets nothing but their own status', async () => {
+    const { status } = await api('GET', '/api/state', null, WAITING);
+    assert.strictEqual(status, 401, 'waiting is not the same as being in');
+    const r = await fetch(BASE + '/api/auth/me', { headers: { cookie: cookieFor(WAITING) } });
+    const b = await r.json();
+    assert.strictEqual(b.status, 'pending', 'but they can see that they are waiting');
+    assert.strictEqual(b.me.email, 'waiting@example.com');
+  });
+
+  await t('two people cannot see each other\'s programs', async () => {
+    // Give each of them something distinctive.
+    await api('POST', '/api/exercise', { name: 'OWNER SECRET MACHINE' }, OWNER);
+    await api('POST', '/api/exercise', { name: 'FRIEND SECRET MACHINE' }, FRIEND);
+
+    const { body: mine } = await api('GET', '/api/state', null, OWNER);
+    const { body: theirs } = await api('GET', '/api/state', null, FRIEND);
+
+    const names = (w) => w.exercises.map(e => e.name).join('|');
+    assert.ok(/OWNER SECRET/.test(names(mine)) && !/FRIEND SECRET/.test(names(mine)),
+      'the owner must not see the friend\'s catalogue');
+    assert.ok(/FRIEND SECRET/.test(names(theirs)) && !/OWNER SECRET/.test(names(theirs)),
+      'and the friend must not see the owner\'s');
+    // Separate plans, separate workouts, separate ids.
+    assert.notStrictEqual(mine.plans[0].id, theirs.plans[0].id);
+    assert.notDeepStrictEqual(mine.workouts, theirs.workouts);
+  });
+
+  await t('one person cannot touch another person\'s plan by id', async () => {
+    const { body: mine } = await api('GET', '/api/state', null, OWNER);
+    const target = mine.plans[0].id;
+    // The friend knows the id and asks for it directly — the resolution happens in
+    // THEIR slice, so it simply isn't there.
+    const patch = await api('PATCH', `/api/plan/${target}`, { name: 'PWNED' }, FRIEND);
+    assert.strictEqual(patch.status, 404, 'no cross-user write');
+    const del = await api('DELETE', `/api/plan/${target}`, null, FRIEND);
+    assert.ok(del.status === 404 || del.status === 400, 'no cross-user delete');
+    const act = await api('POST', '/api/plan/active', { id: target }, FRIEND);
+    assert.strictEqual(act.status, 404, 'and it cannot be made active either');
+
+    const { body: after } = await api('GET', '/api/state', null, OWNER);
+    assert.notStrictEqual(after.plans[0].name, 'PWNED', 'the owner\'s plan is untouched');
+  });
+
+  await t('a workout posted by one person never lands in another\'s log', async () => {
+    const { body: f } = await api('GET', '/api/state', null, FRIEND);
+    const before = (await api('GET', '/api/state', null, OWNER)).body.workouts.length;
+    await api('POST', '/api/workout', {
+      id: 'w-friend-only', planId: f.plans[0].id, done: true,
+      entries: f.planned.map(p => ({ ...p, sets: [8, 8, 8] })),
+    }, FRIEND);
+    const { body: mine } = await api('GET', '/api/state', null, OWNER);
+    assert.strictEqual(mine.workouts.length, before, 'the owner\'s log did not grow');
+    assert.ok(!mine.workouts.some(w => w.id === 'w-friend-only'));
+    // And the friend's own progression did advance, so this is isolation and not
+    // the write silently failing.
+    const { body: f2 } = await api('GET', '/api/state', null, FRIEND);
+    assert.ok(f2.workouts.some(w => w.id === 'w-friend-only'));
+  });
+
+  await t('a friend\'s push subscription is not on the owner\'s devices', async () => {
+    const sub = {
+      endpoint: 'https://push.example.com/friend-device',
+      keys: { p256dh: 'x'.repeat(80), auth: 'y'.repeat(20) },
+    };
+    await api('POST', '/api/push/subscribe', { subscription: sub }, FRIEND);
+    const { body: mine } = await api('GET', '/api/state', null, OWNER);
+    const { body: theirs } = await api('GET', '/api/state', null, FRIEND);
+    assert.strictEqual(theirs.push.subscribed, true);
+    assert.strictEqual(mine.push.subscribed, false, 'a reminder must not fan out to everybody');
+  });
+
+  await t('only the owner sees who is waiting, or decides', async () => {
+    const { body: mine } = await api('GET', '/api/state', null, OWNER);
+    assert.ok(mine.pending.some(u => u.email === 'waiting@example.com'),
+      'the owner is shown the queue');
+    const { body: theirs } = await api('GET', '/api/state', null, FRIEND);
+    assert.deepStrictEqual(theirs.pending, [], 'nobody else is even told there is one');
+
+    assert.strictEqual((await api('GET', '/api/admin/users', null, FRIEND)).status, 403);
+    assert.strictEqual((await api('POST', `/api/admin/user/${WAITING}`, { status: 'active' }, FRIEND)).status,
+      403, 'a friend cannot let their own friends in');
+  });
+
+  await t('approving somebody gives them a program of their own', async () => {
+    assert.strictEqual((await api('GET', '/api/state', null, WAITING)).status, 401);
+    const { status } = await api('POST', `/api/admin/user/${WAITING}`, { status: 'active' }, OWNER);
+    assert.strictEqual(status, 200);
+    const { body } = await api('GET', '/api/state', null, WAITING);
+    assert.strictEqual(body.plans.length, 1, 'a fresh starter plan');
+    assert.strictEqual(body.exercises.length, 6, 'and the seeded catalogue');
+    assert.strictEqual(body.workouts.length, 0, 'and nobody else\'s history');
+    assert.strictEqual(body.me.owner, false);
+  });
+
+  await t('the owner cannot lock themselves out, and bad statuses are refused', async () => {
+    assert.strictEqual((await api('POST', `/api/admin/user/${OWNER}`, { status: 'denied' })).status,
+      400, 'there would be nobody left to approve anyone');
+    assert.strictEqual((await api('POST', `/api/admin/user/${WAITING}`, { status: 'wat' })).status, 400);
+    assert.strictEqual((await api('POST', '/api/admin/user/nobody', { status: 'active' })).status, 404);
+  });
+
+  await t('denying somebody keeps their history for if you change your mind', async () => {
+    await api('POST', `/api/admin/user/${WAITING}`, { status: 'denied' }, OWNER);
+    assert.strictEqual((await api('GET', '/api/state', null, WAITING)).status, 401, 'shut out');
+    await api('POST', `/api/admin/user/${WAITING}`, { status: 'active' }, OWNER);
+    const { status } = await api('GET', '/api/state', null, WAITING);
+    assert.strictEqual(status, 200, 'and let back in without starting over');
+  });
+
+  await t('the owner adopts the pre-accounts program; nobody else can', async () => {
+    // A store written before accounts existed, with a distinctive machine in it.
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-legacy-'));
+    const f2 = path.join(dir2, 'store.json');
+    const c2 = path.join(dir2, 'config.json');
+    seedUsers(f2, c2);
+    const seeded = JSON.parse(fs.readFileSync(f2, 'utf8'));
+    seeded.legacy = {
+      exercises: [{ id: 'legacy-machine', name: 'LEGACY MACHINE', short: null, step: 10, weight: 100 }],
+      plans: [{
+        id: 'legacy-plan', name: 'From before accounts', exerciseIds: ['legacy-machine'],
+        rules: { sets: 3, minReps: 8, maxReps: 12, repStep: 2, restSec: 90 },
+        schedule: { mode: 'off', days: [], everyN: 2, at: '18:00', anchor: null }, archived: false,
+      }],
+      activePlanId: 'legacy-plan',
+      progress: { 'legacy-plan': { 'legacy-machine': { weight: 175, target: 10 } } },
+      workouts: [{ id: 'w-old', planId: 'legacy-plan', date: '2026-08-01', done: true, applied: true, entries: [] }],
+      push: { subs: [], sent: {}, tried: {} }, settings: {},
+    };
+    fs.writeFileSync(f2, JSON.stringify(seeded));
+
+    const port2 = PORT + 3;
+    const child2 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port2), DATA_FILE: f2, CONFIG_FILE: c2, NO_PUSH: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const base2 = `http://127.0.0.1:${port2}`;
+    const get = (as) => fetch(base2 + '/api/state', { headers: { cookie: cookieFor(as) } })
+      .then(async r => ({ status: r.status, body: await r.json().catch(() => null) }));
+    for (let i = 0; i < 60; i++) {
+      try { if ((await fetch(base2 + '/api/auth/me')).ok) break; } catch (_) {}
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    // The friend goes first, on purpose: a race must not hand them the data.
+    const friend = await get(FRIEND);
+    assert.strictEqual(friend.status, 200);
+    assert.ok(!friend.body.exercises.some(e => e.name === 'LEGACY MACHINE'),
+      'only the owner inherits what was there before accounts');
+    assert.strictEqual(friend.body.workouts.length, 0);
+
+    const owner = await get(OWNER);
+    assert.ok(owner.body.exercises.some(e => e.name === 'LEGACY MACHINE'), 'the owner gets it');
+    assert.strictEqual(owner.body.plans[0].name, 'From before accounts');
+    assert.strictEqual(owner.body.planned[0].weight, 175, 'at the weight they left off at');
+    assert.strictEqual(owner.body.workouts.length, 1, 'with their history');
+
+    // Adopted exactly once — a second request must not re-adopt or wipe. Posted
+    // to THIS server, not the suite's main one.
+    await fetch(base2 + '/api/exercise', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookieFor(OWNER) },
+      body: JSON.stringify({ name: 'AFTER ADOPTION' }),
+    });
+    const again = await get(OWNER);
+    assert.ok(again.body.exercises.some(e => e.name === 'LEGACY MACHINE'));
+    assert.ok(again.body.exercises.some(e => e.name === 'AFTER ADOPTION'));
+
+    child2.kill('SIGTERM');
+    await new Promise(r => child2.on('exit', r));
+    try { fs.rmSync(dir2, { recursive: true, force: true }); } catch (_) {}
+  });
+
+  await t('signing out clears the cookie', async () => {
+    const r = await fetch(BASE + '/api/auth/signout', {
+      method: 'POST', headers: { cookie: cookieFor(OWNER) },
+    });
+    assert.ok(/Max-Age=0/.test(r.headers.get('set-cookie') || ''), 'the cookie is expired, not just forgotten');
   });
 
   await t('data survives a restart', async () => {

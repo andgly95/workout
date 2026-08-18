@@ -44,8 +44,25 @@ function connectCdp(wsUrl) {
   });
 }
 
+// The browser needs a session, and there is no Google here. Same approach as
+// test/test.js: pre-write the secret and the user, then set a cookie signed by
+// the very code the server verifies with — no test-only door in the server.
+const AUTH = require('../lib/auth');
+const SECRET = 'client-check-secret-0123456789abcdef';
+const UID = 'g-cc-owner';
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-cc-'));
+  fs.writeFileSync(path.join(dir, 'store.json'), JSON.stringify({
+    users: {
+      [UID]: {
+        id: UID, email: 'cc@example.com', name: 'CC', picture: null,
+        status: 'active', owner: true, createdAt: 1, lastSeen: 1,
+      },
+    },
+    data: {}, legacy: null, seq: 1,
+  }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ sessionSecret: SECRET }));
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
     env: {
       ...process.env, PORT: String(PORT), DATA_FILE: path.join(dir, 'store.json'),
@@ -113,6 +130,11 @@ function connectCdp(wsUrl) {
     await S('Runtime.enable');
     await S('Log.enable');
     await S('Page.enable');
+    await S('Network.enable');
+    await S('Network.setCookie', {
+      name: AUTH.COOKIE, value: AUTH.sign(UID, SECRET),
+      domain: '127.0.0.1', path: '/', httpOnly: true,
+    });
     await S('Page.navigate', { url: BASE + '/' });
     await sleep(2500);
 
@@ -129,6 +151,9 @@ function connectCdp(wsUrl) {
     const visible = (id) => evalJs(
       `(() => { const e = document.getElementById('${id}');
         return !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length); })()`);
+
+    // Signed in, so the app is behind the sign-in screen rather than on it.
+    check(!(await visible('scr-auth')), 'the sign-in screen should be gone with a session');
 
     // Home renders the starter plan — all six seeded machines.
     const cards = await evalJs(`document.querySelectorAll('#todayList .ex-card').length`);
@@ -460,8 +485,22 @@ function connectCdp(wsUrl) {
     await evalJs(`document.getElementById('btnBackHome').click()`);
     await sleep(300);
 
+    // ── signed out ──────────────────────────────────────────────────────
+    // The gate, by layout: clearing the cookie and reloading must land on the
+    // sign-in screen with the app behind it, not on a half-rendered home screen.
+    await S('Network.clearBrowserCookies');
+    await S('Page.navigate', { url: BASE + '/' });
+    await sleep(2000);
+    check(await visible('scr-auth'), 'no session must land on the sign-in screen');
+    check(await visible('authSignIn'), 'and offer a way in');
+    check(!(await visible('todayList')),
+      'the prescription must not be on screen behind the gate');
+    check(await evalJs(`document.getElementById('todayList').getBoundingClientRect().height === 0
+      || getComputedStyle(document.getElementById('scr-auth')).zIndex >= 80`),
+      'the sign-in screen must cover what is behind it');
+
     if (errors.length) throw new Error('page errors:\n' + errors.join('\n'));
-    console.log('client-check: ok — full workout, calendar and alerts all clean');
+    console.log('client-check: ok — auth gate, full workout, calendar and alerts all clean');
   } catch (e) {
     fail = e;
     console.error('client-check FAILED:', e.message);

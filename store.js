@@ -7,18 +7,15 @@ const FILE = process.env.DATA_FILE || path.join(__dirname, 'data', 'store.json')
 
 function defaultState() {
   return {
-    // The catalogue, and the named plans that pick from it. Both user-editable —
-    // lib/plan.js seeds them from the original hardcoded program on first load.
-    exercises: [],
-    plans: [],
-    activePlanId: null,
-    // planId -> exerciseId -> { weight, target } : what to lift NEXT time.
-    // Nested per plan on purpose — see lib/plan.js.
-    progress: {},
-    // [{ id, planId, date, startedAt, finishedAt, done, entries:[...] }]
-    workouts: [],
-    push: { subs: [], sent: {} },
-    settings: {},
+    // Google `sub` -> the person. `status` gates everything: a stranger who signs
+    // in is `pending` and has NO data slice at all until the owner approves them.
+    users: {},
+    // uid -> that person's whole program. One slice per user, never shared, and
+    // always resolved from the session — see lib/auth.js.
+    data: {},
+    // A store written before accounts existed, waiting to be adopted by the owner
+    // on their first sign-in. Null once claimed.
+    legacy: null,
     seq: 1,
   };
 }
@@ -26,9 +23,6 @@ function defaultState() {
 let state;
 try {
   state = JSON.parse(fs.readFileSync(FILE, 'utf8'));
-  if (!state.progress) state.progress = {};
-  if (!state.workouts) state.workouts = [];
-  if (!state.settings) state.settings = {};
   if (!state.seq) state.seq = 1;
 } catch (e) {
   if (e.code !== 'ENOENT') {
@@ -73,10 +67,38 @@ function nextId(prefix) {
   return `${prefix}${state.seq++}`;
 }
 
-// Seed the catalogue and fold a pre-plans store into the new shape. Runs on LOAD
-// only, which is why plan.js is the thing that owns it — a container created
-// anywhere else would miss stores written since the last restart.
-require('./lib/plan').migrate(state, nextId);
+// Fold a pre-accounts store into the new shape. The single user's whole program
+// is moved aside into `state.legacy` rather than being assigned to an id we can't
+// know yet — a Google `sub` only exists once somebody signs in. The first owner
+// to arrive adopts it (see lib/routes.js), and until then it is untouched.
+//
+// Runs on LOAD only, which is why it lives here: a container created anywhere
+// else would miss stores written since the last restart.
+(function migrateStore() {
+  if (!state.users) state.users = {};
+  if (!state.data) state.data = {};
+  if (state.legacy === undefined) state.legacy = null;
+  // The pre-accounts shape is recognised by its own top-level program fields.
+  if (Array.isArray(state.plans) || Array.isArray(state.workouts)) {
+    state.legacy = {
+      exercises: state.exercises || [],
+      plans: state.plans || [],
+      activePlanId: state.activePlanId || null,
+      progress: state.progress || {},
+      workouts: state.workouts || [],
+      push: state.push || { subs: [], sent: {}, tried: {} },
+      settings: state.settings || {},
+    };
+    delete state.exercises; delete state.plans; delete state.activePlanId;
+    delete state.progress; delete state.workouts; delete state.push;
+    delete state.settings;
+    console.log('store: pre-accounts data set aside for the first owner to adopt');
+  }
+  // Anything already per-user still gets its own containers backfilled.
+  const plan = require('./lib/plan');
+  for (const d of Object.values(state.data)) plan.migrate(d, nextId);
+  if (state.legacy) plan.migrate(state.legacy, nextId);
+})();
 
 // Make sure data/ exists before the first write.
 try { fs.mkdirSync(path.dirname(FILE), { recursive: true }); } catch (_) {}

@@ -3,9 +3,8 @@
 Progressive-overload workout tracker. **The program is data**: you build your own
 workouts, each with its own overload rules and schedule, and switch between them.
 
-Still single user (Andrew), no accounts — auth is Cloudflare Access in front of the
-tunnel, so the app itself has no login. Multi-user is **not** built; making the
-program customisable was the prerequisite for it, not the same job.
+**Multi-user, Google sign-in.** Andrew owns the instance; everyone else signs in,
+lands as `pending`, and waits to be approved from inside the app.
 
 Live at **https://workout.guess-ai.app** (Cloudflare tunnel `hot-seat` → `localhost:3003`).
 Repo: `github.com/andgly95/workout` (**public**).
@@ -16,11 +15,61 @@ Same shape as `~/the-square`, minus socket.io (single user — plain REST is eno
 
 - **Runtime:** Node.js v22, no build step — `node server.js` is production
 - **Server:** Express, thin `server.js` + CommonJS modules in `lib/`
-- **Deps:** `express`, `web-push` (reminders) — nothing else
+- **Deps:** `express`, `web-push` (reminders), `google-auth-library` (sign-in)
 - **Store:** single JSON file (`data/store.json`) via `store.js` — no database
 - **Frontend:** vanilla JS ES modules in `public/js/` + plain HTML/CSS
 - **Deployment:** systemd service `workout` on the Pi, port 3003
-- **Tests:** `npm test` — 96 rules/schedule/plan/push/calendar/API assertions + a headless-chromium check
+- **Tests:** `npm test` — 110 rules/schedule/plan/push/auth/calendar/API assertions + a headless-chromium check
+
+## Accounts — read this before touching any route
+
+`lib/auth.js` is the only thing between a stranger and somebody's training log.
+Three rules, and everything else follows from them:
+
+1. **A session cookie is HMAC-signed.** Unsigned, tampered or expired → no user.
+   Stateless (`<base64url payload>.<sig>`), so there is no session table to grow
+   and a restart doesn't sign everyone out. Deleting `sessionSecret` from config
+   signs *everybody* out — that is the whole revocation story and it is enough here.
+2. **`pending` until approved.** A stranger who signs in gets a user record and
+   **no data slice at all**. They can read their own status and nothing else.
+3. **Every data route runs against `req.d`**, the slice belonging to whoever the
+   cookie says you are. **There is no route that accepts a user id.**
+
+Rule 3 is the one that matters. A uid in a path or a body is how a multi-user app
+leaks — it takes one handler that forgets to check it against the session. Here
+there is nothing to forget, because the id is never accepted. A friend who knows
+your plan id and PATCHes it gets a 404: the lookup happens in *their* slice, so it
+simply isn't there. That has a test, and so does every other route.
+
+- **`d` is threaded explicitly** into every helper (`activePlan(d)`,
+  `plannedEntries(d, p)`, `wire(d, user)`…). A helper that could reach the whole
+  store on its own is a helper that could return somebody else's plan.
+- **The guard is applied to path prefixes in one place**, not remembered per
+  handler. The failure mode of the per-handler version is a route that silently
+  serves everybody.
+- **Google ID tokens are verified with `google-auth-library`.** RS256 + JWKS
+  caching + every `iss`/`aud`/`exp` edge case is exactly the sort of thing that
+  looks right and isn't. An **unverified** email is rejected outright, or anyone
+  could claim an address they don't control.
+- **The user id is the Google `sub`, never the email.** Emails change hands.
+- **`ownerEmail` in config decides who the owner is.** Without it the first person
+  to sign in wins, which is fine on a box only you can reach and is not fine the
+  moment you hand the URL out. Set it.
+- **The owner adopts the pre-accounts data** — `state.legacy`, set aside by
+  store.js on load. Adoption happens in `dataFor()`, not in the sign-in route, so
+  it is exercised by every authenticated request rather than only on the single
+  most consequential request of the app's life.
+- **The owner cannot be denied.** There would be nobody left to approve anyone.
+- Denying somebody **keeps their data**, so letting them back in doesn't cost them
+  their history.
+
+### Testing auth without Google
+
+The suite pre-writes `sessionSecret` into `CONFIG_FILE` and the users into the
+store, then signs its own cookies with **the same code the server verifies with**.
+There is deliberately **no test-only bypass in production code** — that is how a
+bypass eventually ships. `client-check.js` does the same and sets the cookie over
+CDP.
 
 ## The program (the whole point)
 
@@ -147,6 +196,7 @@ server.js              — express setup + listen (~12 lines)
 store.js               — JSON read/write, debounced atomic save, SIGTERM flush
 deploy.sh              — npm test → restart → verify active → push to GitHub
 lib/
+  auth.js              — THE boundary: sessions, Google verification, the 3 rules
   progression.js       — nextState(cur, reps, opts) + describeRules(). THE rules. PURE.
   plan.js              — THE gate: catalogue, plans, rules guards, migration
   schedule.js          — due / next / overdue. PURE, no clock. Truth-tabled.
@@ -165,6 +215,7 @@ public/
     util.js            — $, esc, mmss, dayLabel, toast, showScreen, buzz
     alarm.js           — THE rest alert: audio-thread scheduling + notifications
     sync.js            — local-first save + offline retry queue
+    auth.js            — sign-in / waiting screens; boot is gated on it
     home.js            — Today screen (prescription + stats + plan picker + alerts)
     plan.js            — the plan editor. Progressive disclosure lives here.
     session.js         — live workout: sets, weight stepper, rest timer, wake lock
@@ -362,6 +413,18 @@ shaded, because a half-drawn final column reads as a missing week.
 
 ```js
 state = {
+  // Google `sub` -> the person. `status` gates everything.
+  users: { uid: { id, email, name, picture, status, owner, createdAt, lastSeen } },
+  // uid -> that person's whole program. One slice each, never shared, always
+  // resolved from the session.
+  data: { uid: userData },
+  // The pre-accounts program, waiting for the owner's first request. Null once
+  // adopted.
+  legacy: userData | null,
+  seq: 1,
+}
+
+userData = {
   // The catalogue of machines, and the named workouts that pick from it.
   exercises: [{ id, name, short, step, weight }],
   plans: [{ id, name, exerciseIds, rules, schedule, archived }],
@@ -381,7 +444,6 @@ state = {
   push: { subs: [{ endpoint, keys, at }], sent: { planId: 'YYYY-MM-DD' },
           tried: { planId: { day, n } } },
   settings: {},   // restSec moved into plan.rules; nothing global is left
-  seq: 1,
 }
 ```
 
@@ -407,6 +469,10 @@ reordering is a fact about that afternoon and is never written back to the plan.
 | `POST /api/plan/active` | which workout you're doing |
 | `POST /api/push/subscribe` · `/unsubscribe` · `/test` | reminders |
 | `POST /api/settings` | `restSec` (forwarded into the active plan's rules) |
+| `POST /api/auth/google` | ID token in, session cookie out. **Public.** |
+| `GET /api/auth/me` | status / clientId — safe signed out, and what the client boots on |
+| `POST /api/auth/signout` | expires the cookie |
+| `GET /api/admin/users` · `POST /api/admin/user/:id` | **owner only** — who is waiting, and letting them in |
 | `POST /api/workout/:id/unskip` | undo an accidental skip and catch the weight up |
 | `DELETE /api/workout/:id` | remove a logged workout |
 
@@ -452,6 +518,26 @@ reordering is a fact about that afternoon and is never written back to the plan.
   visibility in tests via layout (`offsetWidth`/`getClientRects`), not `.hidden`.
 
 ## Deployment
+
+**`config.local.json` (gitignored, 0600) must carry `googleClientId` or nobody can
+sign in — including you.** The app has no bypass, so deploying without it locks the
+instance. `ownerEmail` should be set too; without it the owner is whoever signs in
+first.
+
+```json
+{ "googleClientId": "….apps.googleusercontent.com",
+  "ownerEmail": "you@gmail.com",
+  "vapidSubject": "mailto:you@gmail.com" }
+```
+
+The Google client is an **OAuth 2.0 Web application** credential with the live
+origin under *Authorized JavaScript origins*. No client secret is needed — ID
+tokens are verified against Google's public keys.
+
+**Cloudflare Access is still in front of the tunnel.** Until that policy is
+removed, friends cannot reach the app at all no matter what the app thinks. Remove
+it only after signing in yourself and confirming the gate works — at that point the
+app's own auth is the only thing protecting it.
 
 ```bash
 npm run deploy                   # npm test → restart → verify active → push to GitHub

@@ -7,6 +7,7 @@ import { initSession, startSession, restoreSession, endSessionUI, renderSession 
 import { renderSummary } from './summary.js';
 import { initHistory, renderHistory } from './history.js';
 import { initPlan, openPlan } from './plan.js';
+import { initAuth, checkAuth, showAuthScreen } from './auth.js';
 
 function goHome() {
   endSessionUI();
@@ -26,6 +27,15 @@ async function onFinish(snap, synced) {
 }
 
 async function boot() {
+  // Identity first, and everything else behind it. Nothing below runs — not the
+  // store fetch, not a render — until the server has said who you are.
+  initAuth(() => start());
+  const status = await checkAuth();
+  if (status !== 'active') return showAuthScreen(status);
+  await start();
+}
+
+async function start() {
   initSync();
   await fetchState();
 
