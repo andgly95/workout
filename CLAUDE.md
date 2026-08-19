@@ -3,8 +3,10 @@
 Progressive-overload workout tracker. **The program is data**: you build your own
 workouts, each with its own overload rules and schedule, and switch between them.
 
-**Multi-user, Google sign-in.** Andrew owns the instance; everyone else signs in,
-lands as `pending`, and waits to be approved from inside the app.
+**Multi-user.** Two ways in — **Cloudflare Access** (preferred here, since the
+tunnel is already in front) or **Google Sign-In** — and one set of users behind
+them. Andrew owns the instance; everyone else lands as `pending` and waits to be
+approved from inside the app.
 
 Live at **https://workout.guess-ai.app** (Cloudflare tunnel `hot-seat` → `localhost:3003`).
 Repo: `github.com/andgly95/workout` (**public**).
@@ -19,7 +21,7 @@ Same shape as `~/the-square`, minus socket.io (single user — plain REST is eno
 - **Store:** single JSON file (`data/store.json`) via `store.js` — no database
 - **Frontend:** vanilla JS ES modules in `public/js/` + plain HTML/CSS
 - **Deployment:** systemd service `workout` on the Pi, port 3003
-- **Tests:** `npm test` — 110 rules/schedule/plan/push/auth/calendar/API assertions + a headless-chromium check
+- **Tests:** `npm test` — 125 rules/schedule/plan/push/auth/access/calendar/API assertions + a headless-chromium check
 
 ## Accounts — read this before touching any route
 
@@ -62,6 +64,53 @@ simply isn't there. That has a test, and so does every other route.
 - **The owner cannot be denied.** There would be nobody left to approve anyone.
 - Denying somebody **keeps their data**, so letting them back in doesn't cost them
   their history.
+
+### Two doors, one set of users
+
+Cloudflare Access and Google Sign-In are identity **sources**. Both end in
+`upsertUser()`, so the approval queue, the data slices and everything downstream
+are identical whichever way somebody arrived — a third source later is a function,
+not a refactor.
+
+| | Cloudflare Access | Google Sign-In |
+|---|---|---|
+| who authenticates | Cloudflare, before the request reaches the Pi | the app, after it does |
+| config | `cfAccessTeam` + `cfAccessAud` | `googleClientId` |
+| the user sees | nothing — already signed in | a Google button |
+| unauthenticated traffic | never reaches the origin | reaches it and gets a 401 |
+
+Access is the stronger posture: the request doesn't arrive at all unless it passes,
+so the exposed surface is Cloudflare's rather than a box in a house. When
+`cfAccessTeam`/`cfAccessAud` are set the client is told `clientId: null` and never
+loads Google's script.
+
+**The Access header is VERIFIED, never trusted.** This is the whole of
+`lib/cfaccess.js` and the reason it isn't three lines. The tempting one-liner is to
+read `Cf-Access-Authenticated-User-Email` — but anyone who can reach the origin
+directly, over the LAN or if the tunnel is ever bypassed, can set any header they
+like. That would be a total auth bypass for everyone on the same network. Instead:
+
+- The JWT signature is checked against the team's published JWKS (cached an hour).
+- **`alg` is pinned to RS256.** Honouring the header's own algorithm is the classic
+  JWT bug: `none` authenticates everybody and HS256 lets the public key be used as
+  an HMAC secret. Both have a test.
+- **`aud` is checked** against the Access application's tag. Without it a token
+  minted for *any* app on the team would open this one — and this team fronts four.
+- `iss`, `exp` and `nbf` are checked, with 60s of clock tolerance.
+- A failure to reach Cloudflare's certs degrades to "not signed in", never a 500 on
+  every request.
+- **Identities are namespaced** (`cf:<sub>`, `google:<sub>`), and a second door is
+  linked to an existing user **by verified email**. Safe only because both sources
+  verify the address; without it, signing in through Access and then through Google
+  would silently hand you two accounts and two training logs.
+- Access getting you to the door is **not** the same as being let in — a stranger
+  Access admits is still `pending` to the app.
+- Signing out redirects to `/cdn-cgi/access/logout`: clearing our own cookie alone
+  would just be re-authenticated on the next request.
+
+The verifier is driven from a **locally generated RSA keypair** in the suite, and
+one test stands a fake JWKS in front of a whole server, so the crypto path is
+exercised rather than being a branch nobody runs until it matters.
 
 ### Testing auth without Google
 
@@ -197,6 +246,7 @@ store.js               — JSON read/write, debounced atomic save, SIGTERM flush
 deploy.sh              — npm test → restart → verify active → push to GitHub
 lib/
   auth.js              — THE boundary: sessions, Google verification, the 3 rules
+  cfaccess.js          — Cloudflare Access assertions, VERIFIED not trusted
   progression.js       — nextState(cur, reps, opts) + describeRules(). THE rules. PURE.
   plan.js              — THE gate: catalogue, plans, rules guards, migration
   schedule.js          — due / next / overdue. PURE, no clock. Truth-tabled.
@@ -519,25 +569,27 @@ reordering is a fact about that afternoon and is never written back to the plan.
 
 ## Deployment
 
-**`config.local.json` (gitignored, 0600) must carry `googleClientId` or nobody can
-sign in — including you.** The app has no bypass, so deploying without it locks the
-instance. `ownerEmail` should be set too; without it the owner is whoever signs in
-first.
+**`config.local.json` (gitignored, 0600) must configure at least one door, or
+nobody can sign in — including you.** The app has no bypass.
 
 ```json
-{ "googleClientId": "….apps.googleusercontent.com",
-  "ownerEmail": "you@gmail.com",
+{ "cfAccessTeam": "your-team",            // ← Access: the bit before
+  "cfAccessAud": "<application AUD tag>", //   .cloudflareaccess.com, and the
+  "ownerEmail": "you@gmail.com",          //   app's Audience tag
   "vapidSubject": "mailto:you@gmail.com" }
 ```
 
-The Google client is an **OAuth 2.0 Web application** credential with the live
-origin under *Authorized JavaScript origins*. No client secret is needed — ID
-tokens are verified against Google's public keys.
+`cfAccessAud` is on the Access application's *Overview* tab as **Application
+Audience (AUD) Tag**. Set the Access policy to allow whoever you want to *reach*
+the app — the app's own queue decides who gets an account.
 
-**Cloudflare Access is still in front of the tunnel.** Until that policy is
-removed, friends cannot reach the app at all no matter what the app thinks. Remove
-it only after signing in yourself and confirming the gate works — at that point the
-app's own auth is the only thing protecting it.
+For Google instead, `googleClientId` from an **OAuth 2.0 Web application**
+credential with the live origin under *Authorized JavaScript origins*. No client
+secret — ID tokens are verified against Google's public keys. Setting both is fine;
+Access wins when its assertion verifies.
+
+`ownerEmail` should always be set. Without it the owner is whoever signs in first,
+which is fine on a box only you can reach and is not fine once you hand the URL out.
 
 ```bash
 npm run deploy                   # npm test → restart → verify active → push to GitHub

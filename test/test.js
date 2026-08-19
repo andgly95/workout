@@ -2,10 +2,18 @@
 // layer 2 boots a real server against a throwaway store and drives the API.
 const assert = require('assert');
 const crypto = require('crypto');
+const http = require('http');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+
+// Point this process's own config at scratch space BEFORE anything requires
+// lib/config (which resolves the path once, at load). Without it the auth
+// sections write cfAccessTeam and a session secret straight into the working
+// tree's config.local.json — a test suite must not edit the thing it is testing.
+process.env.CONFIG_FILE = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'lift-suite-')), 'config.json');
 
 const P = require('../lib/progression');
 
@@ -396,6 +404,143 @@ async function planRules() {
   });
 }
 
+/* ── 1d2. Cloudflare Access ─────────────────────────────────────────────────
+   The header Access sets is trivially forgeable by anyone who can reach the
+   origin directly, so this whole file exists to VERIFY it rather than believe it.
+   Driven from a locally generated RSA keypair, which means the crypto path is
+   actually exercised instead of being a branch nobody runs until it matters. */
+
+async function accessRules() {
+  console.log('\ncloudflare access');
+  const CF = require('../lib/cfaccess');
+  const TEAM = 'https://testteam.cloudflareaccess.com';
+  const AUD = 'abc123aud';
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+  const KEYS = [jwk];
+
+  const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+  const mint = (claims = {}, head = {}, key = privateKey) => {
+    const h = b64({ alg: 'RS256', kid: 'k1', typ: 'JWT', ...head });
+    const p = b64({
+      iss: TEAM, aud: AUD, email: 'friend@example.com', sub: 'cf-sub-1',
+      exp: Math.floor(Date.now() / 1000) + 3600, ...claims,
+    });
+    const sig = crypto.sign('RSA-SHA256', Buffer.from(`${h}.${p}`), key).toString('base64url');
+    return `${h}.${p}.${sig}`;
+  };
+  const ok = (t, opts) => CF.verifyJwt(t, KEYS, { iss: TEAM, aud: AUD, ...opts });
+
+  await t('a properly signed assertion verifies', () => {
+    const c = ok(mint());
+    assert.ok(c, 'a good token must verify');
+    assert.strictEqual(c.email, 'friend@example.com');
+  });
+
+  await t('a token signed by somebody else does not', () => {
+    const other = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+    assert.strictEqual(ok(mint({}, {}, other)), null,
+      'this is the whole point — the header is verified, not trusted');
+  });
+
+  await t('a tampered payload does not', () => {
+    const good = mint();
+    const [h, , sig] = good.split('.');
+    const evil = b64({ iss: TEAM, aud: AUD, email: 'attacker@evil.com', sub: 'x',
+      exp: Math.floor(Date.now() / 1000) + 3600 });
+    assert.strictEqual(ok(`${h}.${evil}.${sig}`), null, 'swapping the claims must break the signature');
+  });
+
+  await t('alg is PINNED — none and HS256 are both refused', () => {
+    // `alg: none` with an empty signature authenticates everybody, and HS256 lets
+    // the PUBLIC key be used as an HMAC secret. Both are refused by not reading
+    // the algorithm out of the header at all.
+    const h = b64({ alg: 'none', kid: 'k1' });
+    const pl = b64({ iss: TEAM, aud: AUD, email: 'a@b.c', sub: 'x', exp: Math.floor(Date.now() / 1000) + 99 });
+    assert.strictEqual(ok(`${h}.${pl}.`), null, 'alg:none');
+
+    const pem = publicKey.export({ type: 'spki', format: 'pem' });
+    const h2 = b64({ alg: 'HS256', kid: 'k1' });
+    const sig2 = crypto.createHmac('sha256', pem).update(`${h2}.${pl}`).digest('base64url');
+    assert.strictEqual(ok(`${h2}.${pl}.${sig2}`), null, 'alg confusion');
+  });
+
+  await t('an unknown key id does not verify', () => {
+    assert.strictEqual(ok(mint({}, { kid: 'somebody-elses-key' })), null);
+  });
+
+  await t('an expired assertion does not', () => {
+    assert.strictEqual(ok(mint({ exp: Math.floor(Date.now() / 1000) - 3600 })), null);
+    // ...but a small clock difference is tolerated rather than locking people out.
+    assert.ok(ok(mint({ exp: Math.floor(Date.now() / 1000) - 10 })), 'a few seconds of skew is fine');
+  });
+
+  await t('a token minted for another Access app on the same team does not', () => {
+    // Without the aud check, ANY app on the team could mint a pass into this one —
+    // and this team fronts four.
+    assert.strictEqual(ok(mint({ aud: 'a-different-application' })), null);
+    assert.strictEqual(ok(mint({ iss: 'https://someone-elses-team.cloudflareaccess.com' })), null,
+      'and a different team entirely certainly cannot');
+  });
+
+  await t('an aud ARRAY is honoured, per the JWT spec', () => {
+    assert.ok(ok(mint({ aud: ['other', AUD] })), 'aud may legitimately be a list');
+    assert.strictEqual(ok(mint({ aud: ['other', 'nope'] })), null);
+  });
+
+  await t('junk is refused without throwing', () => {
+    for (const bad of ['', 'x', 'a.b', 'a.b.c.d', null, undefined, 'not.a.jwt']) {
+      assert.strictEqual(ok(bad), null, String(bad));
+    }
+  });
+
+  await t('the assertion is read from either the header or the cookie', () => {
+    assert.strictEqual(CF.tokenFrom({ headers: { 'cf-access-jwt-assertion': 'tok' } }), 'tok');
+    assert.strictEqual(CF.tokenFrom({ headers: { cookie: 'a=1; CF_Authorization=tok2; b=2' } }), 'tok2');
+    assert.strictEqual(CF.tokenFrom({ headers: {} }), null);
+  });
+
+  await t('with no team configured, Access identifies nobody', async () => {
+    // A checkout that has never heard of Cloudflare must not half-enable this.
+    assert.strictEqual(CF.configured(), false);
+    assert.strictEqual(await CF.identify({ headers: { 'cf-access-jwt-assertion': mint() } }), null);
+  });
+
+  await t('a verified assertion becomes a namespaced identity', async () => {
+    const cfg = require('../lib/config');
+    const before = cfg.read();
+    cfg.set({ cfAccessTeam: 'testteam', cfAccessAud: AUD });
+    CF._resetCache();
+    const who = await CF.identify(
+      { headers: { 'cf-access-jwt-assertion': mint() } },
+      { jwks: async () => KEYS },
+    );
+    assert.ok(who);
+    assert.strictEqual(who.id, 'cf:cf-sub-1', 'namespaced so it cannot collide with a Google sub');
+    assert.strictEqual(who.email, 'friend@example.com');
+    assert.strictEqual(who.via, 'cloudflare');
+    // And a bad one identifies nobody, rather than throwing into a 500.
+    assert.strictEqual(await CF.identify(
+      { headers: { 'cf-access-jwt-assertion': 'garbage' } }, { jwks: async () => KEYS }), null);
+    cfg.set({ cfAccessTeam: before.cfAccessTeam, cfAccessAud: before.cfAccessAud });
+    CF._resetCache();
+  });
+
+  await t('unreachable certs mean "not signed in", not a 500 on every request', async () => {
+    const cfg = require('../lib/config');
+    cfg.set({ cfAccessTeam: 'testteam', cfAccessAud: AUD });
+    CF._resetCache();
+    const who = await CF.identify(
+      { headers: { 'cf-access-jwt-assertion': mint() } },
+      { jwks: async () => { throw new Error('network down'); } },
+    );
+    assert.strictEqual(who, null);
+    cfg.set({ cfAccessTeam: undefined, cfAccessAud: undefined });
+    CF._resetCache();
+  });
+}
+
 /* ── 1e. the reminder sender ────────────────────────────────────────────────
    lib/push.js is the one module here that touches the store, so this section
    points DATA_FILE at a temp file BEFORE requiring it. Nothing else in this
@@ -405,6 +550,7 @@ async function planRules() {
 async function reminderSender() {
   console.log('\nreminder sender');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-push-'));
+  const priorConfig = process.env.CONFIG_FILE;
   process.env.DATA_FILE = path.join(dir, 'store.json');
   process.env.CONFIG_FILE = path.join(dir, 'config.json');
   fs.writeFileSync(process.env.DATA_FILE,
@@ -486,7 +632,7 @@ async function reminderSender() {
   push.stop();
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) {}
   delete process.env.DATA_FILE;
-  delete process.env.CONFIG_FILE;
+  process.env.CONFIG_FILE = priorConfig;
 }
 
 /* ── 1b. the training calendar ─────────────────────────────────────────── */
@@ -1326,11 +1472,121 @@ async function server() {
     try { fs.rmSync(dir2, { recursive: true, force: true }); } catch (_) {}
   });
 
+  await t('a forged Access header gets you nowhere', async () => {
+    // The one-liner everybody reaches for is to trust
+    // `Cf-Access-Authenticated-User-Email`. Anyone who can reach the origin
+    // directly can set it, so it must buy exactly nothing.
+    for (const headers of [
+      { 'cf-access-authenticated-user-email': 'owner@example.com' },
+      { 'cf-access-jwt-assertion': 'made.up.token' },
+      { cookie: 'CF_Authorization=made.up.token' },
+    ]) {
+      const r = await fetch(BASE + '/api/state', { headers });
+      assert.strictEqual(r.status, 401, `accepted a forged header: ${JSON.stringify(headers)}`);
+    }
+  });
+
   await t('signing out clears the cookie', async () => {
     const r = await fetch(BASE + '/api/auth/signout', {
       method: 'POST', headers: { cookie: cookieFor(OWNER) },
     });
     assert.ok(/Max-Age=0/.test(r.headers.get('set-cookie') || ''), 'the cookie is expired, not just forgotten');
+  });
+
+  await t('behind Access you are signed in with no button to press', async () => {
+    // A whole server configured for Access, with a locally generated key served
+    // as the team's JWKS — so the real middleware path runs end to end.
+    const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'lift-cf-'));
+    const f3 = path.join(dir3, 'store.json');
+    const c3 = path.join(dir3, 'config.json');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const jwk = { ...publicKey.export({ format: 'jwk' }), kid: 'k1', alg: 'RS256', use: 'sig' };
+
+    // Stand in for testteam.cloudflareaccess.com/cdn-cgi/access/certs.
+    const certsPort = PORT + 4;
+    const certs = http.createServer((_q, s2) => {
+      s2.writeHead(200, { 'content-type': 'application/json' });
+      s2.end(JSON.stringify({ keys: [jwk] }));
+    });
+    await new Promise(r => certs.listen(certsPort, r));
+
+    fs.writeFileSync(f3, JSON.stringify({ users: {}, data: {}, legacy: null, seq: 1 }));
+    fs.writeFileSync(c3, JSON.stringify({
+      sessionSecret: SECRET,
+      cfAccessTeam: 'testteam',
+      cfAccessAud: 'aud-x',
+      // Point the verifier at the stand-in instead of the real Cloudflare.
+      cfAccessIssuer: 'https://testteam.cloudflareaccess.com',
+      cfAccessCertsUrl: `http://127.0.0.1:${certsPort}/certs`,
+      ownerEmail: 'boss@example.com',
+    }));
+
+    const port3 = PORT + 5;
+    const child3 = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: { ...process.env, PORT: String(port3), DATA_FILE: f3, CONFIG_FILE: c3, NO_PUSH: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let log3 = '';
+    child3.stdout.on('data', d => { log3 += d; });
+    child3.stderr.on('data', d => { log3 += d; });
+    const base3 = `http://127.0.0.1:${port3}`;
+    // Readiness has to prove it is OUR child, not merely that something answers on
+    // this port. A leftover server from an earlier run squatting here answers
+    // every probe and reports no Access at all, which reads as a bug in the code
+    // under test — it cost an hour once.
+    let up3 = false;
+    for (let i = 0; i < 60 && child3.exitCode === null; i++) {
+      try {
+        const r = await fetch(base3 + '/api/auth/me');
+        if (r.ok && (await r.json()).via === 'cloudflare') { up3 = true; break; }
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 150));
+    }
+    assert.ok(up3, `the Access-fronted server never came up (exit ${child3.exitCode})`
+      + `\n--- child log ---\n${log3}`);
+
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const assertion = (email, sub) => {
+      const h = b64({ alg: 'RS256', kid: 'k1', typ: 'JWT' });
+      const pl = b64({
+        iss: 'https://testteam.cloudflareaccess.com', aud: 'aud-x', email, sub,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      });
+      const sig = crypto.sign('RSA-SHA256', Buffer.from(`${h}.${pl}`), privateKey).toString('base64url');
+      return `${h}.${pl}.${sig}`;
+    };
+    const asAccess = (p2, email, sub) => fetch(base3 + p2, {
+      headers: { 'cf-access-jwt-assertion': assertion(email, sub) },
+    }).then(async r => ({ status: r.status, body: await r.json().catch(() => null), setCookie: r.headers.get('set-cookie') }));
+
+    // The owner walks straight in — Access already authenticated them.
+    const boss = await asAccess('/api/state', 'boss@example.com', 'cf-boss');
+    assert.strictEqual(boss.status, 200, 'a verified Access assertion is a sign-in');
+    assert.strictEqual(boss.body.me.email, 'boss@example.com');
+    assert.strictEqual(boss.body.me.owner, true, 'ownerEmail decided it, not arrival order');
+    assert.ok(/lift_session=/.test(boss.setCookie || ''),
+      'and an app session is minted so later requests are a cheap cookie check');
+
+    // A stranger Access lets through is still only pending to the app.
+    const mate = await asAccess('/api/state', 'mate@example.com', 'cf-mate');
+    assert.strictEqual(mate.status, 401, 'Access getting you to the door is not the same as being let in');
+    const me = await fetch(base3 + '/api/auth/me', {
+      headers: { 'cf-access-jwt-assertion': assertion('mate@example.com', 'cf-mate') },
+    }).then(r => r.json());
+    assert.strictEqual(me.status, 'pending');
+    assert.strictEqual(me.clientId, null, 'no Google button is offered behind Access');
+    assert.strictEqual(me.via, 'cloudflare');
+
+    // A forged assertion, on the same server, buys nothing.
+    const forged = await fetch(base3 + '/api/state', {
+      headers: { 'cf-access-jwt-assertion': 'nope.nope.nope' },
+    });
+    assert.strictEqual(forged.status, 401);
+
+    child3.kill('SIGTERM');
+    await new Promise(r => child3.on('exit', r));
+    certs.close();
+    try { fs.rmSync(dir3, { recursive: true, force: true }); } catch (_) {}
   });
 
   await t('data survives a restart', async () => {
@@ -1357,6 +1613,7 @@ async function server() {
   await rules();
   await scheduleRules();
   await planRules();
+  await accessRules();
   await reminderSender();
   await calendarGrid();
   await server();

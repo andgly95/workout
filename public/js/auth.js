@@ -8,6 +8,7 @@ import { $, esc, toast } from './util.js';
 
 let onSignedIn = () => {};
 let clientId = null;
+let via = 'google';
 
 export const state = { status: 'anon', me: null };
 
@@ -18,6 +19,7 @@ export async function checkAuth() {
     state.status = b.status || 'anon';
     state.me = b.me || null;
     clientId = b.clientId || null;
+    via = b.via || 'google';
     return state.status;
   } catch (_) {
     // No network. If we've been in before, the cached shell and the local queue
@@ -40,6 +42,17 @@ export function showAuthScreen(status) {
 // in the shell, so somebody already signed in never fetches it — and so a gym
 // with no signal doesn't sit waiting on accounts.google.com.
 function mountGoogle() {
+  // Behind Cloudflare Access there is nothing to press: Access authenticates you
+  // before the request reaches the app at all, so landing here means its
+  // assertion did not verify — which is worth saying plainly rather than
+  // offering a button that cannot help.
+  if (via === 'cloudflare') {
+    $('authNote').textContent =
+      'This app is behind Cloudflare Access and your login was not recognised. '
+      + 'Reload the page, or sign in again through Cloudflare.';
+    $('authNote').hidden = false;
+    return;
+  }
   if (!clientId) {
     $('authNote').textContent =
       'Sign-in is not configured on this server yet (no Google client ID).';
@@ -107,6 +120,13 @@ async function submit(credential) {
 export async function signOut() {
   try { await fetch('/api/auth/signout', { method: 'POST' }); } catch (_) {}
   localStorage.removeItem('liftWasIn');
+  // Behind Access, clearing our cookie alone changes nothing — Access would just
+  // re-authenticate you on the next request. Its own logout is what ends the
+  // session, so send them there.
+  if (via === 'cloudflare') {
+    location.href = '/cdn-cgi/access/logout';
+    return;
+  }
   // A full reload is the honest way to drop every trace of the last person from
   // memory. Anything less means hoping each module cleared its own copy.
   location.reload();

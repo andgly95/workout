@@ -19,9 +19,15 @@ has their own machines, their own plans, their own weights and their own history
 nothing is shared, and no route anywhere accepts a user id, so there is no handler
 that can forget to check one against your session.
 
-Self-hosting it needs a Google OAuth **Web application** client ID in
-`config.local.json` (gitignored). No client secret: ID tokens are verified against
-Google's public keys.
+Two ways in, one set of accounts behind them: **Cloudflare Access**, if you already
+front the app with it, or **Google Sign-In**. Behind Access there is no button to
+press — Cloudflare has already authenticated you before the request reaches the
+server, and traffic that fails never arrives at all.
+
+Either way the assertion is *verified*, not trusted. Reading Access's
+`Cf-Access-Authenticated-User-Email` header is a one-line auth bypass for anyone who
+can reach the origin directly, so the JWT is checked against Cloudflare's published
+keys with the algorithm pinned and the audience checked.
 
 ## Build your own workouts
 
