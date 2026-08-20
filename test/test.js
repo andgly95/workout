@@ -1472,6 +1472,33 @@ async function server() {
     try { fs.rmSync(dir2, { recursive: true, force: true }); } catch (_) {}
   });
 
+  await t('the setup helper reports what Access sent, and trusts none of it', async () => {
+    // Finding the AUD tag is chicken-and-egg: you cannot verify an assertion until
+    // you have configured the audience you are trying to read off it. So this one
+    // endpoint decodes without verifying — and must never become a way in.
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const fake = `${b64({ alg: 'RS256', kid: 'k' })}.${b64({
+      iss: 'https://someteam.cloudflareaccess.com', aud: ['the-aud-tag'],
+      email: 'x@y.z', exp: Math.floor(Date.now() / 1000) + 60,
+    })}.notasignature`;
+
+    const none = await api('GET', '/api/auth/access-info', null, null);
+    assert.strictEqual(none.body.accessInFront, false);
+    assert.ok(/not in front|directly/.test(none.body.hint), 'it says why it saw nothing');
+
+    const r = await fetch(BASE + '/api/auth/access-info', {
+      headers: { 'cf-access-jwt-assertion': fake },
+    });
+    const b = await r.json();
+    assert.deepStrictEqual(b.seen.aud, ['the-aud-tag'], 'the tag you came for');
+    assert.strictEqual(b.seen.iss, 'https://someteam.cloudflareaccess.com');
+
+    // Decoding is NOT authenticating: the same unsigned token must still be
+    // refused everywhere that matters.
+    const gate = await fetch(BASE + '/api/state', { headers: { 'cf-access-jwt-assertion': fake } });
+    assert.strictEqual(gate.status, 401, 'reading a token is not believing it');
+  });
+
   await t('a forged Access header gets you nowhere', async () => {
     // The one-liner everybody reaches for is to trust
     // `Cf-Access-Authenticated-User-Email`. Anyone who can reach the origin

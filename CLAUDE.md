@@ -21,7 +21,7 @@ Same shape as `~/the-square`, minus socket.io (single user — plain REST is eno
 - **Store:** single JSON file (`data/store.json`) via `store.js` — no database
 - **Frontend:** vanilla JS ES modules in `public/js/` + plain HTML/CSS
 - **Deployment:** systemd service `workout` on the Pi, port 3003
-- **Tests:** `npm test` — 125 rules/schedule/plan/push/auth/access/calendar/API assertions + a headless-chromium check
+- **Tests:** `npm test` — 126 rules/schedule/plan/push/auth/access/calendar/API assertions + a headless-chromium check
 
 ## Accounts — read this before touching any route
 
@@ -521,6 +521,7 @@ reordering is a fact about that afternoon and is never written back to the plan.
 | `POST /api/settings` | `restSec` (forwarded into the active plan's rules) |
 | `POST /api/auth/google` | ID token in, session cookie out. **Public.** |
 | `GET /api/auth/me` | status / clientId — safe signed out, and what the client boots on |
+| `GET /api/auth/access-info` | setup: what Cloudflare is sending, decoded but **not trusted** |
 | `POST /api/auth/signout` | expires the cookie |
 | `GET /api/admin/users` · `POST /api/admin/user/:id` | **owner only** — who is waiting, and letting them in |
 | `POST /api/workout/:id/unskip` | undo an accidental skip and catch the weight up |
@@ -579,8 +580,18 @@ nobody can sign in — including you.** The app has no bypass.
   "vapidSubject": "mailto:you@gmail.com" }
 ```
 
-`cfAccessAud` is on the Access application's *Overview* tab as **Application
-Audience (AUD) Tag**. Set the Access policy to allow whoever you want to *reach*
+**Can't find the AUD tag?** Don't hunt the dashboard — deploy first and open
+`/api/auth/access-info` in a browser that has been through Access. Every assertion
+Cloudflare signs carries the tag, so the app reads it back off the request and
+tells you exactly what to paste. That endpoint is public by necessity (you need it
+*before* anything is configured) and safe by construction: every value it echoes
+came out of a token the caller sent, so a stranger learns nothing they didn't
+already have, and knowing an AUD tag forges nothing because the signature is still
+checked. It also answers the prior question — whether Access is in front of this
+hostname at all.
+
+In the dashboard it is on the Access application's *Overview* tab as **Application
+Audience (AUD) Tag**, when that tab has it. Set the Access policy to allow whoever you want to *reach*
 the app — the app's own queue decides who gets an account.
 
 For Google instead, `googleClientId` from an **OAuth 2.0 Web application**
